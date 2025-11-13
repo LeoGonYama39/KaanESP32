@@ -1,5 +1,5 @@
 /*
- * Maquina de Estados para Menu en LCD 20x4 con ESP32
+ * Código del ESP32-wroom-32D para Kaan, proyecto de integración mecatrónica
  *
  * Hardware:
  * - LCD 20x4 (I2C)
@@ -11,18 +11,16 @@
  * - Boton SW (OK): Aceptar / Siguiente.
  * - Boton Externo (BACK): Atras / Cancelar.
  *
- * REQUISITOS DEL USUARIO:
- * 1. Botones SIN resistencias externas -> Se usa INPUT_PULLUP.
- * 2. Splash screen de 3 segundos.
- * 3. Sin texto de navegación en la Línea 4.
- * 4. Sigue el flujo de menú proporcionado.
  */
 
-// --- 1. LIBRERÍAS ---
+//////////////////Librerías/////////////////////////
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
+#include "esp_timer.h"
+//Falta la del DHT
+//Falta la del MPU
 
-// --- 2. CONFIGURACIÓN HARDWARE ---
+//////////////////Pines/////////////////////////
 
 // Pines del LCD I2C (Por defecto en la ESP32)
 // SDA = GPIO 21
@@ -39,7 +37,7 @@
 // Configuración del LCD
 LiquidCrystal_I2C lcd(0x27, 20, 4);
 
-// --- 3. MAQUINA DE ESTADOS (States) ---
+//////////////////Estados de la máquina de estados/////////////////////////
 enum State {
   STATE_SPLASH,
   STATE_HOME,
@@ -48,21 +46,24 @@ enum State {
   STATE_MENU_MODIFY,
   STATE_EDIT_DIA,
   STATE_NEW_WARN,
-  SET_DIA,
-  SET_MIN_TEMP,
-  SET_MIN_HUMD,
+  NEW_DIA,
+  NEW_MIN_TEMP,
+  NEW_MIN_HUMD,
   STATE_NEW_CONFIRM,
-  SET_MAX_TEMP,
-  SET_MAX_HUMD
+  NEW_MAX_TEMP,
+  NEW_MAX_HUMD,
+  EDIT_TEMP_MIN,
+  EDIT_TEMP_MAX,
+  EDIT_HUMD_MIN,
+  EDIT_HUMD_MAX,
+  STATE_LIMIT
 };
 State currentState;
 
-//Defino los chars especiales (á, é, í, ó, ú, ñ, Í)
-                            //(0, 1, 2, 3, 4, 5, 6)
+//Defino los chars especiales (á, é, í, ó, ú, ñ, Í, º)
+                            //(0, 1, 2, 3, 4, 5, 6, 7)
 //Tengo que definir por bits
 //Sólo puedo definir 8 (0 - 7)
-
-
 
 byte a_tilde[8] = {
   B00110,
@@ -141,7 +142,18 @@ byte I_tilde[8] = {
   B00000
 };
 
-// --- 4. VARIABLES GLOBALES DE NAVEGACIÓN ---
+byte grado[8] = {
+  B00000,
+  B00111,
+  B00101,
+  B00111,
+  B00000,
+  B00111,
+  B00000,
+  B00000
+};
+
+//////////////////Varaibles de navegación/////////////////////////
 // Para el Encoder
 volatile long encoderPos = 0; // Posición actual del encoder (modificada por ISR)
 long lastEncoderPos = 0;      // Última posición leída
@@ -168,7 +180,23 @@ int humdInf = 60;
 int humdSup = 90;
 int tempSup = 60;
 
-// --- 5. INTERRUPCIÓN DEL ENCODER (ISR) ---
+//Variables de auxilio, para que se pueda seguir monitoreando mientras se cambian los límites
+int auxTimepo = 0;
+int auxTempInf = 30;
+int auxHumdInf = 60;
+int auxHumdSup = 90;
+int auxTempSup = 60;
+
+////////////Banderas para lso timers///////////////
+volatile bool update_lcd = false;
+volatile bool upload_firebase = false;
+esp_timer_handle_t timer_lcd;  
+esp_timer_handle_t timer_firebase;    
+volatile bool timerLCDactive = false;
+volatile bool timerFIREBASEactive = false;
+
+
+//////////////////Interrupción del encoder/////////////////////////
 // Esta función se llama CADA vez que el pin CLK cambia
 void IRAM_ATTR readEncoderISR() {
   // Lee el pin DT. Si es diferente a CLK, giramos en un sentido.
@@ -179,14 +207,26 @@ void IRAM_ATTR readEncoderISR() {
   }
 }
 
-// --- 6. SETUP ---
+//Interrupción de los timers
+//ES MEJOR NO PONER CÓDIGO TAN PESADO
+void IRAM_ATTR timer_callback(void* arg) {
+  int id = (int)arg;
+
+  switch(id){
+    case 1: update_lcd = true; break;
+    case 2: upload_firebase = true; break; 
+  }
+
+}
+
+//////////////////Setup/////////////////////////
 void setup() {
   Serial.begin(115200);
 
-  // Configurar Pines de Botones (¡IMPORTANTE!)
-  // Usamos INPUT_PULLUP para que la ESP32 active una resistencia interna.
-  // El pin estará en HIGH (1) por defecto.
-  // Al presionar el botón (conectado a GND), el pin leerá LOW (0).
+  // Configurar Pines de Botones
+  // INPUT_PULLUP la resistencia interna.
+  // El pin HIGH en defecto.
+  // Al presionar el botón (conectado a GND), el pin leerá LOW.
   pinMode(ENCODER_SW_PIN, INPUT_PULLUP);
   pinMode(BOTON_BACK_PIN, INPUT_PULLUP);
 
@@ -197,10 +237,33 @@ void setup() {
   // Activar la interrupción en el pin CLK
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), readEncoderISR, CHANGE);
 
+  /////////////////////Setup de los timers//////////////////////////////
+
+  // Configura el timer periódico
+  const esp_timer_create_args_t args_lcd = {
+    .callback = &timer_callback,        //Apuntador de la función
+    .arg = (void*)1,                        //Argumento que recibirá la función
+    .dispatch_method = ESP_TIMER_TASK,  //Método de llamado.  ESP_TIMER_TASK se ejecuta en la tarea de esp_timer
+    .name = "timer_lcd"
+  };
+  esp_timer_create_args_t args_firebase = {
+    .callback = &timer_callback,
+    .arg = (void*)2,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "t2"
+  };
+              
+  esp_timer_create(&args_lcd, &timer_lcd);     //Crea el timer
+  //esp_timer_start_periodic(timer_lcd, 1000000);       //Cada 1 segundo
+
+  esp_timer_create(&args_firebase, &timer_firebase);   
+  //esp_timer_start_periodic(timer_firebase, 10000000); //Cada 10 segundos
+
   // Iniciar LCD
   lcd.init();
   lcd.backlight();
   
+  //Agregar los chars especialicados que creé
   lcd.createChar(0, a_tilde);
   lcd.createChar(1, e_tilde);
   lcd.createChar(2, i_tilde);
@@ -208,8 +271,9 @@ void setup() {
   lcd.createChar(4, u_tilde);
   lcd.createChar(5, enie);
   lcd.createChar(6, I_tilde);
+  lcd.createChar(7, grado);
 
-  // ----- INICIO: SPLASH SCREEN -----
+  //////////////////Pantalla de inicio/////////////////////////
   currentState = STATE_SPLASH;
   lcd.clear();
   lcd.setCursor(0, 0);
@@ -220,42 +284,52 @@ void setup() {
   lcd.print("| Cuidar y guardar |");
   lcd.setCursor(0, 3);
   lcd.print("|__________________|");
-  delay(3000); // Pausa de 3 segundos
-  // ----- FIN: SPLASH SCREEN -----
+  delay(3000); 
 
-  // Decidir el estado inicial después del splash
-  // (Aquí iría tu lógica para ver si hay una sesión guardada en memoria)
+
+  //Decidir el estado inicial después del inicio
+  //Si es que podemos cargar memoria
   if (sessionActive) {
     currentState = STATE_HOME;
   } else {
     currentState = STATE_NO_SESSION;
   }
   
-  // Dibujar la primera pantalla
+  //Dibujar la primera pantalla
   drawScreen(); 
 }
 
-// --- 7. LOOP PRINCIPAL ---
+//////////////////Loop/////////////////////////
 void loop() {
-  // 1. Revisa los inputs (botones y encoder)
+  //Revisa los inputs (botones y encoder)
   handleInputs();
 
-  // 2. Si un input causó un cambio, la bandera estará activa
+  //Si un input causó un cambio, la bandera estará activa
   if (okPressed || backPressed || encoderIncrement != 0) {
-    // 3. Procesa el input según el estado actual
+    //Procesa el input según el estado actual
     handleStateLogic();
     
-    // 4. Limpia las banderas
+    //Limpia las banderas
     okPressed = false;
     backPressed = false;
     encoderIncrement = 0;
   }
   
-  // (El loop se repite muy rápido, pero solo redibuja la pantalla
-  // cuando la lógica de `handleStateLogic` lo ordena)
+  //////Para actualizar el lcd////////////
+  if (update_lcd) {
+    update_lcd = false;
+    Serial.println("lcd actualizado");
+  }
+
+  //////Para subir datos a firebase////////////
+  if (upload_firebase) {
+    upload_firebase = false;
+    Serial.println("Upload a firebase");
+  }
+
 }
 
-// --- 8. MANEJO DE INPUTS (Lectura y Debounce) ---
+//////////////////Manejo de inputs/////////////////////////
 void handleInputs() {
   // --- Encoder ---
   // Lee la posición actual del encoder (variable volatil)
@@ -296,27 +370,48 @@ void handleInputs() {
   lastBackState = currentBackState; // Actualiza el estado anterior
 }
 
-// --- 9. MANEJO DE LÓGICA (El cerebro de la máquina de estados) ---
+///////////Lógica de transición de la máquina de estados///////////////
 void handleStateLogic() {
   bool needsRedraw = false; // Solo redibuja si algo cambia
 
   switch (currentState) {
     
-    case STATE_NO_SESSION:
+    case STATE_NO_SESSION:    //Estado de inicio, sin medición
       if (okPressed) {
-        currentState = SET_DIA;
-        menuSelection = tiempo;
+        currentState = NEW_DIA;   //Ok, iniciar nueva medición e ir a NEW_DIA
+        menuSelection = tiempo;   //Setear igual el tiempo y menuSelection
         needsRedraw = true;
       }
       break;
 
-    case STATE_HOME:
+    case STATE_HOME:        //Menú principal, muestra temp, humd y el tiempo restante
       if (okPressed) {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
         needsRedraw = true;
       }
+
+      if (backPressed) {
+        currentState = STATE_LIMIT;
+        menuSelection = 0;
+        needsRedraw = true;
+      }
       break;
+
+    case STATE_LIMIT:        //Menú principal, muestra temp, humd y el tiempo restante
+      if (okPressed) {
+        currentState = STATE_MENU_MAIN;
+        menuSelection = 0;
+        needsRedraw = true;
+      }
+
+      if (backPressed) {
+        currentState = STATE_HOME;
+        menuSelection = 0;
+        needsRedraw = true;
+      }
+      break;
+
 
     case STATE_MENU_MAIN:
       if (encoderIncrement != 0) {
@@ -353,14 +448,18 @@ void handleStateLogic() {
       if (okPressed) {
         if (menuSelection == 0) { 
           currentState = STATE_EDIT_DIA;
-          editableValue = 14; 
+          editableValue = tiempo; 
           menuSelection = 0;
         }
         else if (menuSelection == 1) { 
-          currentState = STATE_MENU_MAIN;
+          currentState = EDIT_TEMP_MIN;
+          auxTempInf = tempInf;
+          editableValue = auxTempInf;
           menuSelection = 0;
         } else {
-          currentState = STATE_MENU_MAIN;
+          currentState = EDIT_HUMD_MIN;
+          auxHumdInf = humdInf;
+          editableValue = auxHumdInf;
           menuSelection = 0;
         }
         needsRedraw = true;
@@ -372,6 +471,92 @@ void handleStateLogic() {
       }
       break;
 
+    case EDIT_TEMP_MIN: 
+      if (encoderIncrement != 0) {
+        editableValue += encoderIncrement;
+        if (editableValue < 0) editableValue = 0;
+        if (editableValue > 99) editableValue = 99;
+        needsRedraw = false;
+      }
+      if (okPressed) {
+        auxTempInf = editableValue; 
+        currentState = EDIT_TEMP_MAX;
+        auxTempSup = auxTempInf + 1;
+        editableValue = auxTempSup;
+        needsRedraw = true;
+      }
+      if (backPressed) {
+        currentState = STATE_MENU_MODIFY;
+        menuSelection = 0;
+        needsRedraw = true;
+      }
+      break;
+
+    case EDIT_TEMP_MAX: 
+      if (encoderIncrement != 0) {
+        editableValue += encoderIncrement;
+        if (editableValue < auxTempInf + 1) editableValue = auxTempInf + 1;
+        if (editableValue > 100) editableValue = 100;
+        needsRedraw = false;
+      }
+      if (okPressed) {
+        auxTempSup = editableValue; 
+        currentState = STATE_HOME;
+        menuSelection = 0;
+        tempInf = auxTempInf;
+        tempSup = auxTempSup;
+        needsRedraw = true;
+      }
+      if (backPressed) {
+        currentState = EDIT_TEMP_MIN;
+        editableValue = auxTempInf;
+        needsRedraw = true;
+      }
+      break;
+
+    case EDIT_HUMD_MIN: 
+      if (encoderIncrement != 0) {
+        editableValue += encoderIncrement;
+        if (editableValue < 0) editableValue = 0;
+        if (editableValue > 99) editableValue = 99;
+        needsRedraw = false;
+      }
+      if (okPressed) {
+        auxHumdInf = editableValue; 
+        currentState = EDIT_HUMD_MAX;
+        auxHumdSup = auxHumdInf + 1;
+        editableValue = auxHumdSup;
+        needsRedraw = true;
+      }
+      if (backPressed) {
+        currentState = STATE_MENU_MODIFY;
+        menuSelection = 0;
+        needsRedraw = true;
+      }
+      break;
+
+    case EDIT_HUMD_MAX: 
+      if (encoderIncrement != 0) {
+        editableValue += encoderIncrement;
+        if (editableValue < auxHumdInf + 1) editableValue = auxHumdInf + 1;
+        if (editableValue > 100) editableValue = 100;
+        needsRedraw = false;
+      }
+      if (okPressed) {
+        auxHumdSup = editableValue; 
+        currentState = STATE_HOME;
+        menuSelection = 0;
+        humdInf = auxHumdInf;
+        humdSup = auxHumdSup;
+        needsRedraw = true;
+      }
+      if (backPressed) {
+        currentState = EDIT_HUMD_MIN;
+        editableValue = auxHumdInf;
+        needsRedraw = true;
+      }
+      break;
+
     case STATE_EDIT_DIA:
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
@@ -379,8 +564,7 @@ void handleStateLogic() {
         needsRedraw = false;
       }
       if (okPressed) {
-        Serial.print("Nuevo limite de tiempo guardado: ");
-        Serial.println(editableValue);
+        tiempo = editableValue;
         currentState = STATE_HOME;
         needsRedraw = true;
       }
@@ -397,7 +581,7 @@ void handleStateLogic() {
       }
       if (okPressed) {
         if (menuSelection == 1) {
-          currentState = SET_DIA;
+          currentState = NEW_DIA;
           editableValue = tiempo; 
         } else { 
           currentState = STATE_MENU_MAIN;
@@ -410,7 +594,7 @@ void handleStateLogic() {
       }
       break;
 
-    case SET_DIA: 
+    case NEW_DIA: 
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 1) editableValue = 1;
@@ -418,13 +602,13 @@ void handleStateLogic() {
       }
       if (okPressed) {
         tiempo = editableValue; 
-        currentState = SET_MIN_TEMP;
+        currentState = NEW_MIN_TEMP;
         editableValue = tempInf; 
         needsRedraw = true;
       }
       break;
 
-    case SET_MIN_TEMP: 
+    case NEW_MIN_TEMP: 
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -433,19 +617,19 @@ void handleStateLogic() {
       }
       if (okPressed) {
         tempInf = editableValue; 
-        currentState = SET_MAX_TEMP;
+        currentState = NEW_MAX_TEMP;
         tempSup = tempInf + 1;
         editableValue = tempSup;
         needsRedraw = true;
       }
       if (backPressed) {
-        currentState = SET_DIA;
+        currentState = NEW_DIA;
         editableValue = tiempo;
         needsRedraw = true;
       }
       break;
 
-    case SET_MAX_TEMP: 
+    case NEW_MAX_TEMP: 
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < tempInf + 1) editableValue = tempInf + 1;
@@ -454,18 +638,18 @@ void handleStateLogic() {
       }
       if (okPressed) {
         tempSup = editableValue; 
-        currentState = SET_MIN_HUMD;
+        currentState = NEW_MIN_HUMD;
         editableValue = humdInf;
         needsRedraw = true;
       }
       if (backPressed) {
-        currentState = SET_MIN_TEMP;
+        currentState = NEW_MIN_TEMP;
         editableValue = tempInf;
         needsRedraw = true;
       }
       break;
 
-    case SET_MIN_HUMD:
+    case NEW_MIN_HUMD:
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -474,19 +658,19 @@ void handleStateLogic() {
       }
       if (okPressed) {
         humdInf = editableValue;
-        currentState = SET_MAX_HUMD;
+        currentState = NEW_MAX_HUMD;
         humdSup = humdInf + 1;
         editableValue = humdSup;
         needsRedraw = true;
       }
       if (backPressed) {
-        currentState = SET_MAX_TEMP;
+        currentState = NEW_MAX_TEMP;
         editableValue = tempSup;
         needsRedraw = true;
       }
       break;
 
-    case SET_MAX_HUMD:
+    case NEW_MAX_HUMD:
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < humdInf + 1) editableValue = humdInf + 1;
@@ -500,7 +684,7 @@ void handleStateLogic() {
         needsRedraw = true;
       }
       if (backPressed) {
-        currentState = SET_MIN_HUMD;
+        currentState = NEW_MIN_HUMD;
         editableValue = humdInf;
         needsRedraw = true;
       }
@@ -518,12 +702,12 @@ void handleStateLogic() {
           sessionActive = true;
           currentState = STATE_HOME;
         } else { 
-          currentState = SET_MAX_HUMD;
+          currentState = NEW_MAX_HUMD;
         }
         needsRedraw = true;
       }
       if (backPressed) {
-        currentState = SET_MAX_HUMD;
+        currentState = NEW_MAX_HUMD;
         needsRedraw = true;
       }
       break;
@@ -574,14 +758,32 @@ void drawScreen() {
     
       break;
 
-    case STATE_HOME:
-      // (Aquí pones los datos reales de tus sensores)
+    
+    case STATE_HOME:  //Pantalla que muestra los datos leídos
       lcd.print("CAJA 01 [ACTIVA]");
       lcd.setCursor(0, 1);
       lcd.print(" T: 25.1 C  H: 45%");
       lcd.setCursor(0, 2);
       lcd.print("Rest.: 13d:04h:20m");
-      // L4 queda vacía
+      break;
+
+    
+    case STATE_LIMIT: //Pantalla que muestra los límites
+      lcd.print("===== L");
+      lcd.write(6);
+      lcd.print("MITES ======");
+      lcd.setCursor(0, 1);
+      lcd.print("Temp(");
+      lcd.write(7);
+      lcd.print("C): ");
+      lcd.print(tempInf);
+      lcd.print(" - ");
+      lcd.print(tempSup);
+      lcd.setCursor(0, 2);
+      lcd.print("Humd(%):  ");
+      lcd.print(humdInf);
+      lcd.print(" - ");
+      lcd.print(humdSup);
       break;
 
     case STATE_MENU_MAIN:
@@ -589,43 +791,117 @@ void drawScreen() {
       lcd.write(4);
       lcd.print(" PRINCIPAL ==");
       lcd.setCursor(0, 1);
-      lcd.print("> Modificar L");
+      lcd.print("> Modificar l");
       lcd.write(2);
       lcd.print("mites");
       lcd.setCursor(0, 2);
-      lcd.print("  Iniciar Medici");
+      lcd.print("  Nueva medici");
       lcd.write(3);
       lcd.print("n");
       break;
 
     case STATE_MENU_MODIFY:
-      lcd.print("== MODIFICAR L");
+      lcd.print(" MODIFICAR L");
       lcd.write(6);
       lcd.print("MITES ==");
       lcd.setCursor(0, 1);
       lcd.print("> L");
       lcd.write(2);
-      lcd.print("mite de Tiempo");
+      lcd.print("mite de tiempo");
       lcd.setCursor(0, 2);
       lcd.print("  L");
       lcd.write(2);
-      lcd.print("mite de Temp/hum");
+      lcd.print("mite de temp");
       lcd.setCursor(0, 3);
-      lcd.print("  < Atr");
-      lcd.write(0);
-      lcd.print("s"); 
+      lcd.print("  L");
+      lcd.write(2);
+      lcd.print("mite de humedad"); 
+      Serial.printf("Dias: %d, TempInf: %d, TempSup : %d, HumdInf: %d, HumdSup: %d\n", tiempo, tempInf, tempSup, humdInf, humdSup);
       break;
 
     case STATE_EDIT_DIA:
-      lcd.print("Modif Tiempo (d");
+      lcd.print("Modif tiempo (d");
       lcd.write(2);
       lcd.print("as)");
       lcd.setCursor(0, 1);
       lcd.print("L");
       lcd.write(2);
-      lcd.print("mite Actual: 14d"); // (Deberías usar el valor real)
+      lcd.print("mite actual: ");
+      lcd.print(tiempo); 
       lcd.setCursor(0, 2);
-      lcd.print("Nuevo L");
+      lcd.print("Nuevo l");
+      lcd.write(2);
+      lcd.print("mite: [");
+      lcd.print(editableValue);
+      lcd.print("]");
+      break;
+
+    case EDIT_TEMP_MIN:
+      lcd.print("Modif temp m");
+      lcd.write(2);
+      lcd.print("n (");
+      lcd.write(7);
+      lcd.print("C)");
+      lcd.setCursor(0, 1);
+      lcd.print("L");
+      lcd.write(2);
+      lcd.print("mite actual: ");
+      lcd.print(tempInf); 
+      lcd.setCursor(0, 2);
+      lcd.print("Nuevo l");
+      lcd.write(2);
+      lcd.print("mite: [");
+      lcd.print(editableValue);
+      lcd.print("]");
+      break;
+
+    case EDIT_TEMP_MAX:
+      lcd.print("Modif temp m");
+      lcd.write(0);
+      lcd.print("x (");
+      lcd.write(7);
+      lcd.print("C)");
+      lcd.setCursor(0, 1);
+      lcd.print("L");
+      lcd.write(2);
+      lcd.print("mite actual: ");
+      lcd.print(tempSup); 
+      lcd.setCursor(0, 2);
+      lcd.print("Nuevo l");
+      lcd.write(2);
+      lcd.print("mite: [");
+      lcd.print(editableValue);
+      lcd.print("]");
+      break;
+
+    case EDIT_HUMD_MIN:
+      lcd.print("Modif humd m");
+      lcd.write(2);
+      lcd.print("n (%)");
+      lcd.setCursor(0, 1);
+      lcd.print("L");
+      lcd.write(2);
+      lcd.print("mite actual: ");
+      lcd.print(humdInf); 
+      lcd.setCursor(0, 2);
+      lcd.print("Nuevo l");
+      lcd.write(2);
+      lcd.print("mite: [");
+      lcd.print(editableValue);
+      lcd.print("]");
+      break;
+
+    case EDIT_HUMD_MAX:
+      lcd.print("Modif humd m");
+      lcd.write(0);
+      lcd.print("x (%)");
+      lcd.setCursor(0, 1);
+      lcd.print("L");
+      lcd.write(2);
+      lcd.print("mite actual: ");
+      lcd.print(humdSup); 
+      lcd.setCursor(0, 2);
+      lcd.print("Nuevo l");
       lcd.write(2);
       lcd.print("mite: [");
       lcd.print(editableValue);
@@ -652,12 +928,12 @@ void drawScreen() {
       lcd.write(2);
       break;
 
-    case SET_DIA:
+    case NEW_DIA:
       lcd.print("NUEVA SESI");
       lcd.write(3);
       lcd.print("N (1/5)");
       lcd.setCursor(0, 1);
-      lcd.print("Tiempo L");
+      lcd.print("Tiempo l");
       lcd.write(2);
       lcd.print("mite (d");
       lcd.write(2);
@@ -671,46 +947,50 @@ void drawScreen() {
       break;
 
       
-    case SET_MIN_TEMP:
+    case NEW_MIN_TEMP:
       lcd.print("NUEVA SESI");
       lcd.write(3);
       lcd.print("N (2/5)");
       lcd.setCursor(0, 1);
       lcd.print("L");
       lcd.write(2);
-      lcd.print("mite Temp. M");
+      lcd.print("mite temp M");
       lcd.write(2);
-      lcd.print("n (C)");
+      lcd.print("n (");
+      lcd.write(7);
+      lcd.print("C)");
       lcd.setCursor(0, 2);
       lcd.print("Temp: [");
       lcd.print(editableValue);
       lcd.print("]");
       break;
 
-    case SET_MAX_TEMP:
+    case NEW_MAX_TEMP:
       lcd.print("NUEVA SESI");
       lcd.write(3);
       lcd.print("N (3/5)");
       lcd.setCursor(0, 1);
       lcd.print("L");
       lcd.write(2);
-      lcd.print("mite Temp. M");
+      lcd.print("mite temp M");
       lcd.write(0);
-      lcd.print("x (C)");
+      lcd.print("x (");
+      lcd.write(7);
+      lcd.print("C)");
       lcd.setCursor(0, 2);
       lcd.print("Temp: [");
       lcd.print(editableValue);
       lcd.print("]");
       break;
 
-    case SET_MAX_HUMD:
+    case NEW_MAX_HUMD:
       lcd.print("NUEVA SESI");
       lcd.write(3);
       lcd.print("N (5/5)");
       lcd.setCursor(0, 1);
       lcd.print("L");
       lcd.write(2);
-      lcd.print("mite Hum. M");
+      lcd.print("mite humd M");
       lcd.write(0);
       lcd.print("x (%)");
       lcd.setCursor(0, 2);
@@ -719,14 +999,14 @@ void drawScreen() {
       lcd.print("]");
       break;
 
-    case SET_MIN_HUMD:
+    case NEW_MIN_HUMD:
       lcd.print("NUEVA SESI");
       lcd.write(3);
-      lcd.print("N (5/5)");
+      lcd.print("N (4/5)");
       lcd.setCursor(0, 1);
       lcd.print("L");
       lcd.write(2);
-      lcd.print("mite Hum. M");
+      lcd.print("mite humd M");
       lcd.write(2);
       lcd.print("n (%)");
       lcd.setCursor(0, 2);
@@ -757,31 +1037,31 @@ void changeValor(){
 
   switch (currentState) {
 
-    case SET_DIA:
+    case NEW_DIA:
       lcd.setCursor(7, 2);
       lcd.print(editableValue);
       lcd.print("] ");
       break;
 
-    case SET_MIN_TEMP:
+    case NEW_MIN_TEMP:
       lcd.setCursor(7, 2);
       lcd.print(editableValue);
       lcd.print("] ");
       break;
 
-    case SET_MAX_TEMP:
+    case NEW_MAX_TEMP:
       lcd.setCursor(7, 2);
       lcd.print(editableValue);
       lcd.print("] ");
       break;
 
-    case SET_MIN_HUMD:
+    case NEW_MIN_HUMD:
       lcd.setCursor(7, 2);
       lcd.print(editableValue);
       lcd.print("] ");
       break;
 
-    case SET_MAX_HUMD:
+    case NEW_MAX_HUMD:
       lcd.setCursor(7, 2);
       lcd.print(editableValue);
       lcd.print("] ");
@@ -851,9 +1131,7 @@ void changeValor(){
           lcd.setCursor(0, 2);
           lcd.print(" ");
           lcd.setCursor(0, 3);
-          lcd.print("  < Atr");
-          lcd.write(0);
-          lcd.print("s");
+          lcd.print(" ");
           break;
 
         case 1:
@@ -862,9 +1140,7 @@ void changeValor(){
           lcd.setCursor(0, 2);
           lcd.print(">");
           lcd.setCursor(0, 3);
-          lcd.print("  < Atr");
-          lcd.write(0);
-          lcd.print("s");
+          lcd.print(" ");
           break;
 
         case 2:
@@ -873,9 +1149,7 @@ void changeValor(){
           lcd.setCursor(0, 2);
           lcd.print(" ");
           lcd.setCursor(0, 3);
-          lcd.print("> Atr");
-          lcd.write(0);
-          lcd.print("s     "); 
+          lcd.print(">");
           break;
       }
       
@@ -887,6 +1161,30 @@ void changeValor(){
         lcd.print("]  ");
         break;
   
+  
+      case EDIT_TEMP_MIN:
+        lcd.setCursor(15, 2);
+        lcd.print(editableValue);
+        lcd.print("]  ");       
+        break;
+
+      case EDIT_TEMP_MAX:
+        lcd.setCursor(15, 2);
+        lcd.print(editableValue);
+        lcd.print("]  ");       
+        break;
+  
+      case EDIT_HUMD_MIN:
+        lcd.setCursor(15, 2);
+        lcd.print(editableValue);
+        lcd.print("]  ");       
+        break;
+
+      case EDIT_HUMD_MAX:
+        lcd.setCursor(15, 2);
+        lcd.print(editableValue);
+        lcd.print("]  ");       
+        break;
   }
 
 }
@@ -904,12 +1202,17 @@ void printEstado(){
     case STATE_MENU_MODIFY: estadoNom = "STATE_MENU_MODIFY"; break;
     case STATE_EDIT_DIA: estadoNom = "STATE_EDIT_DIA"; break;
     case STATE_NEW_WARN: estadoNom = "STATE_NEW_WARN"; break;
-    case SET_DIA: estadoNom = "SET_DIA"; break;
-    case SET_MIN_TEMP: estadoNom = "SET_MIN_TEMP"; break;
-    case SET_MAX_TEMP: estadoNom = "SET_MAX_TEMP"; break;
-    case SET_MIN_HUMD: estadoNom = "SET_MIN_HUMD"; break;
-    case SET_MAX_HUMD: estadoNom = "SET_MAX_HUMD"; break;
+    case NEW_DIA: estadoNom = "NEW_DIA"; break;
+    case NEW_MIN_TEMP: estadoNom = "NEW_MIN_TEMP"; break;
+    case NEW_MAX_TEMP: estadoNom = "NEW_MAX_TEMP"; break;
+    case NEW_MIN_HUMD: estadoNom = "NEW_MIN_HUMD"; break;
+    case NEW_MAX_HUMD: estadoNom = "NEW_MAX_HUMD"; break;
     case STATE_NEW_CONFIRM: estadoNom = "STATE_NEW_CONFIRM"; break;
+    case EDIT_TEMP_MIN: estadoNom = "EDIT_TEMP_MIN"; break;
+    case EDIT_TEMP_MAX: estadoNom = "EDIT_TEMP_MAX"; break;
+    case EDIT_HUMD_MIN: estadoNom = "EDIT_HUMD_MIN"; break;
+    case EDIT_HUMD_MAX: estadoNom = "EDIT_HUMD_MAX"; break;
+    case STATE_LIMIT: estadoNom = "STATE_LIMIT"; break;
     default: estadoNom = "DESCONOCIDO"; break;
   }
 
