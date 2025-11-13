@@ -19,9 +19,14 @@
 #include "esp_timer.h"
 #include "DHT.h" 
 //Falta la del MPU
+#include <WiFi.h>
 
 #define DHTPIN 4                //Pin del sensor de temperatura y humedad
 #define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
+
+/////////ssid y password del wifi
+const char* ssid = "OTOÑO25";       
+const char* password = "Ib3r02025ui@"; 
 
 //////////////////Pines/////////////////////////
 
@@ -196,9 +201,10 @@ volatile bool parpadea = false;
 // Callback que se ejecuta cada segundo
 void IRAM_ATTR contador_callback(void* arg) {
   
-  if (segundos_restantes > 0) {
+  if (segundos_restantes > 0) {   //Si no ha acabado...
     segundos_restantes--;
 
+    //Fórmulas para cambiar el tiempo restante en días, horas, minutos y segundos
     restante = segundos_restantes;
     dias = restante / 86400UL;
     restante %= 86400UL;
@@ -208,11 +214,12 @@ void IRAM_ATTR contador_callback(void* arg) {
     restante %= 60UL;
     segundos = restante;
 
+    //Para disparar la función de actaulizar el lcd
     dias_lcd = true;
     
-  } else {
-    parpadea = !parpadea;
-    dias_end = true;
+  } else {    //Si ya acabó
+    parpadea = !parpadea;   //Variable que intercala entre true y false, para que el tiempo parpadee cuando haya acabado
+    dias_end = true;        //Dispara la función para indicar que acabó el tiempo
   }
 }
 
@@ -232,7 +239,7 @@ void IRAM_ATTR readEncoderISR() {
 void IRAM_ATTR timer_callback(void* arg) {
   int id = (int)arg;
 
-  switch(id){
+  switch(id){   //Levanta la bandera adecuada, dependiendo del arg
     case 1: update_lcd = true; break;
     case 2: upload_firebase = true; break; 
   }
@@ -312,6 +319,17 @@ void setup() {
   delay(3000); 
 
 
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|   Conectando a   |");
+  lcd.setCursor(0, 2);
+  lcd.print("|     red WiFi     |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+  setup_wifi();
+
   //Decidir el estado inicial después del inicio
   //Si es que podemos cargar memoria
   if (sessionActive) {
@@ -359,6 +377,7 @@ void loop() {
     }
   }
 
+  ///////Para mostrar que acabó el contador
   if(dias_end){
     dias_end = false;
     switch(currentState){
@@ -443,7 +462,7 @@ void handleStateLogic() {
       }
       break;
 
-    case STATE_LIMIT:        //Menú principal, muestra temp, humd y el tiempo restante
+    case STATE_LIMIT:        //Menú que muestra los límites
       if (okPressed) {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
@@ -458,7 +477,7 @@ void handleStateLogic() {
       break;
 
 
-    case STATE_MENU_MAIN:
+    case STATE_MENU_MAIN:   //Menú de opciones de modificar límites o iniciar nueva medición
       if (encoderIncrement != 0) {
         menuSelection += encoderIncrement;
         if (menuSelection > 1) menuSelection = 0;
@@ -483,7 +502,7 @@ void handleStateLogic() {
       }
       break;
 
-    case STATE_MENU_MODIFY:
+    case STATE_MENU_MODIFY:   //Menú de selección de cambio de límites o tiempo (nueva meidción de tiempo)
       if (encoderIncrement != 0) {
         menuSelection += encoderIncrement;
         if (menuSelection > 2) menuSelection = 0; 
@@ -516,7 +535,7 @@ void handleStateLogic() {
       }
       break;
 
-    case EDIT_TEMP_MIN: 
+    case EDIT_TEMP_MIN:     //Editar el límite de temp mínima
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -537,7 +556,7 @@ void handleStateLogic() {
       }
       break;
 
-    case EDIT_TEMP_MAX: 
+    case EDIT_TEMP_MAX:     //Editar el límite de temperatura máxima
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < auxTempInf + 1) editableValue = auxTempInf + 1;
@@ -559,7 +578,7 @@ void handleStateLogic() {
       }
       break;
 
-    case EDIT_HUMD_MIN: 
+    case EDIT_HUMD_MIN:     //Editar el límite de humedad máxima
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -580,7 +599,7 @@ void handleStateLogic() {
       }
       break;
 
-    case EDIT_HUMD_MAX: 
+    case EDIT_HUMD_MAX:     //Editar el límite de humedad máxima
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < auxHumdInf + 1) editableValue = auxHumdInf + 1;
@@ -602,7 +621,7 @@ void handleStateLogic() {
       }
       break;
 
-    case STATE_EDIT_DIA:
+    case STATE_EDIT_DIA:      //Editar el tiempo, esto inicia un nuevo timer con el tiempo (días) indicado
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 1) editableValue = 1; 
@@ -622,7 +641,7 @@ void handleStateLogic() {
       }
       break;
 
-    case STATE_NEW_WARN:
+    case STATE_NEW_WARN:    //Aviso de que, se iniciará una nueva medición, borrando la anterior
       if (encoderIncrement != 0) {
         menuSelection = !menuSelection; 
         needsRedraw = false;
@@ -633,6 +652,7 @@ void handleStateLogic() {
           editableValue = tiempo; 
           stopTimerLCD();
           stopTimerDias();
+          stopTimerFirebase();
         } else { 
           currentState = STATE_MENU_MAIN;
         }
@@ -644,7 +664,7 @@ void handleStateLogic() {
       }
       break;
 
-    case NEW_DIA: 
+    case NEW_DIA:     //Introducir el día de la nueva medición
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 1) editableValue = 1;
@@ -658,7 +678,7 @@ void handleStateLogic() {
       }
       break;
 
-    case NEW_MIN_TEMP: 
+    case NEW_MIN_TEMP:    //Límite de temp inferior para la nueva medición
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -679,7 +699,7 @@ void handleStateLogic() {
       }
       break;
 
-    case NEW_MAX_TEMP: 
+    case NEW_MAX_TEMP:   //Límite de temp superior para la nueva medición
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < tempInf + 1) editableValue = tempInf + 1;
@@ -699,7 +719,7 @@ void handleStateLogic() {
       }
       break;
 
-    case NEW_MIN_HUMD:
+    case NEW_MIN_HUMD:  //Límite de humedad inferior para la nueva medición
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < 0) editableValue = 0;
@@ -720,7 +740,7 @@ void handleStateLogic() {
       }
       break;
 
-    case NEW_MAX_HUMD:
+    case NEW_MAX_HUMD:    //Límite de humedad superior para la nueva medición
       if (encoderIncrement != 0) {
         editableValue += encoderIncrement;
         if (editableValue < humdInf + 1) editableValue = humdInf + 1;
@@ -740,7 +760,7 @@ void handleStateLogic() {
       }
       break;
 
-    case STATE_NEW_CONFIRM:
+    case STATE_NEW_CONFIRM:   //Confirmar la nueva medición con sus límites ya fijados
       if (encoderIncrement != 0) {
         menuSelection = !menuSelection;
         needsRedraw = false;
@@ -754,6 +774,7 @@ void handleStateLogic() {
           segundos_restantes = (unsigned long) tiempo * 86400UL;
           startTimerLCD();
           startTimerDias();
+          startTimerFirebase();
         } else { 
           currentState = NEW_MAX_HUMD;
         }
@@ -1360,6 +1381,21 @@ void stopTimerDias() {
   }
 }
 
+void startTimerFirebase() {
+  if (!timerFIREBASEactive) {
+    esp_timer_start_periodic(timer_firebase, 10000000);
+    timerFIREBASEactive = true;
+    Serial.println("Timer Firebase activo");
+  }
+}
+void stopTimerFirebase() {
+  if (timerFIREBASEactive) {
+    esp_timer_stop(timer_firebase);
+    timerFIREBASEactive = false;
+    Serial.println("Timer Firebase apagado");
+  }
+}
+
 //Para mostrar que no queda tiempo restante
 void showDiasCero(){
   lcd.setCursor(0, 3);
@@ -1378,4 +1414,20 @@ void showTiempoRes(){
   char mensaje[20];
   sprintf(mensaje, "%02luD %02luH %02luM %02luS", dias, horas, minutos, segundos);
   lcd.print(mensaje);
+}
+
+
+void setup_wifi() {
+  Serial.println();
+  Serial.print("Conectando a: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("\n¡Conectado a Internet!");
 }
