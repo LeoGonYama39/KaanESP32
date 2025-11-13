@@ -17,8 +17,11 @@
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include "esp_timer.h"
-//Falta la del DHT
+#include "DHT.h" 
 //Falta la del MPU
+
+#define DHTPIN 4                //Pin del sensor de temperatura y humedad
+#define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
 
 //////////////////Pines/////////////////////////
 
@@ -73,9 +76,7 @@ byte a_tilde[8] = {
   B01111,
   B10001,
   B01111,
-  B00000
-};
-
+  B00000};
 byte e_tilde[8] = {
   B00110,
   B00000,
@@ -84,9 +85,7 @@ byte e_tilde[8] = {
   B11111,
   B10000,
   B01110,
-  B00000
-};
-
+  B00000};
 byte i_tilde[8] = {
   B00111,
   B00000,
@@ -95,8 +94,7 @@ byte i_tilde[8] = {
   B00100,
   B00100,
   B01110,
-  B00000
-};
+  B00000};
 
 byte o_tilde[8] = {
   B00110,
@@ -106,8 +104,7 @@ byte o_tilde[8] = {
   B10001,
   B10001,
   B01110,
-  B00000
-};
+  B00000};
 
 byte u_tilde[8] = {
   B00110,
@@ -117,8 +114,7 @@ byte u_tilde[8] = {
   B10001,
   B10011,
   B01101,
-  B00000
-};
+  B00000};
 
 byte enie[8] = {
   B01110,
@@ -128,8 +124,7 @@ byte enie[8] = {
   B10001,
   B10001,
   B10001,
-  B00000
-};
+  B00000};
 
 byte I_tilde[8] = {
   B01110,
@@ -139,19 +134,7 @@ byte I_tilde[8] = {
   B00100,
   B00100,
   B01110,
-  B00000
-};
-
-byte grado[8] = {
-  B00000,
-  B00111,
-  B00101,
-  B00111,
-  B00000,
-  B00111,
-  B00000,
-  B00000
-};
+  B00000};
 
 //////////////////Varaibles de navegación/////////////////////////
 // Para el Encoder
@@ -187,7 +170,12 @@ int auxHumdInf = 60;
 int auxHumdSup = 90;
 int auxTempSup = 60;
 
-////////////Banderas para lso timers///////////////
+//Para temperatura y humedad
+float h, t;
+DHT dht(DHTPIN, DHTTYPE);
+
+
+////////////Banderas para los timers///////////////
 volatile bool update_lcd = false;
 volatile bool upload_firebase = false;
 esp_timer_handle_t timer_lcd;  
@@ -222,7 +210,7 @@ void IRAM_ATTR timer_callback(void* arg) {
 //////////////////Setup/////////////////////////
 void setup() {
   Serial.begin(115200);
-
+  Wire.begin(21, 22); 
   // Configurar Pines de Botones
   // INPUT_PULLUP la resistencia interna.
   // El pin HIGH en defecto.
@@ -271,7 +259,6 @@ void setup() {
   lcd.createChar(4, u_tilde);
   lcd.createChar(5, enie);
   lcd.createChar(6, I_tilde);
-  lcd.createChar(7, grado);
 
   //////////////////Pantalla de inicio/////////////////////////
   currentState = STATE_SPLASH;
@@ -318,7 +305,13 @@ void loop() {
   //////Para actualizar el lcd////////////
   if (update_lcd) {
     update_lcd = false;
-    Serial.println("lcd actualizado");
+    calcTempHum();
+    Serial.printf("T: %.2f ºC, H: %.2f%\n", t, h);
+
+    switch(currentState){
+      case STATE_HOME: showTempHum(); break;
+    }
+
   }
 
   //////Para subir datos a firebase////////////
@@ -389,12 +382,14 @@ void handleStateLogic() {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
         needsRedraw = true;
+        startTimerLCD();
       }
 
       if (backPressed) {
         currentState = STATE_LIMIT;
         menuSelection = 0;
         needsRedraw = true;
+        startTimerLCD();
       }
       break;
 
@@ -403,12 +398,14 @@ void handleStateLogic() {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
         needsRedraw = true;
+        startTimerLCD();
       }
 
       if (backPressed) {
         currentState = STATE_HOME;
         menuSelection = 0;
         needsRedraw = true;
+        startTimerLCD();
       }
       break;
 
@@ -583,6 +580,7 @@ void handleStateLogic() {
         if (menuSelection == 1) {
           currentState = NEW_DIA;
           editableValue = tiempo; 
+          stopTimerLCD();
         } else { 
           currentState = STATE_MENU_MAIN;
         }
@@ -701,6 +699,7 @@ void handleStateLogic() {
           Serial.printf("Dias: %d, TempInf: %d, TempSup : %d, HumdInf: %d, HumdSup: %d\n", tiempo, tempInf, tempSup, humdInf, humdSup);
           sessionActive = true;
           currentState = STATE_HOME;
+          startTimerLCD();
         } else { 
           currentState = NEW_MAX_HUMD;
         }
@@ -762,7 +761,9 @@ void drawScreen() {
     case STATE_HOME:  //Pantalla que muestra los datos leídos
       lcd.print("CAJA 01 [ACTIVA]");
       lcd.setCursor(0, 1);
-      lcd.print(" T: 25.1 C  H: 45%");
+      lcd.print("T: ---.- ");
+      lcd.write(223);
+      lcd.print("C  H: ---%");
       lcd.setCursor(0, 2);
       lcd.print("Rest.: 13d:04h:20m");
       break;
@@ -774,7 +775,7 @@ void drawScreen() {
       lcd.print("MITES ======");
       lcd.setCursor(0, 1);
       lcd.print("Temp(");
-      lcd.write(7);
+      lcd.write(223);
       lcd.print("C): ");
       lcd.print(tempInf);
       lcd.print(" - ");
@@ -840,7 +841,7 @@ void drawScreen() {
       lcd.print("Modif temp m");
       lcd.write(2);
       lcd.print("n (");
-      lcd.write(7);
+      lcd.write(223);
       lcd.print("C)");
       lcd.setCursor(0, 1);
       lcd.print("L");
@@ -859,7 +860,7 @@ void drawScreen() {
       lcd.print("Modif temp m");
       lcd.write(0);
       lcd.print("x (");
-      lcd.write(7);
+      lcd.write(223);
       lcd.print("C)");
       lcd.setCursor(0, 1);
       lcd.print("L");
@@ -957,7 +958,7 @@ void drawScreen() {
       lcd.print("mite temp M");
       lcd.write(2);
       lcd.print("n (");
-      lcd.write(7);
+      lcd.write(223);
       lcd.print("C)");
       lcd.setCursor(0, 2);
       lcd.print("Temp: [");
@@ -975,7 +976,7 @@ void drawScreen() {
       lcd.print("mite temp M");
       lcd.write(0);
       lcd.print("x (");
-      lcd.write(7);
+      lcd.write(223);
       lcd.print("C)");
       lcd.setCursor(0, 2);
       lcd.print("Temp: [");
@@ -1221,3 +1222,71 @@ void printEstado(){
 
 }
 
+
+//Imprime errores en el LCD
+//Como imprime un error, deja un while true para dejar el programa atorado aquí
+void showErrorLCD(int id){
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  switch(id){
+    case 0:
+      lcd.print("ERROR EN EL SENSOR DE");
+      lcd.setCursor(0, 1);
+      lcd.print("TEMP Y HUMD.");
+      lcd.print("ID ERROR: 0");
+      break;
+
+      case 1:
+      lcd.print("ERROR EN EL SENSOR ");
+      lcd.setCursor(0, 1);
+      lcd.print("ACELEROMETRO Y GIROS");
+      lcd.print("ID ERROR: 1");
+      break;
+
+      default: return; break;
+  }
+
+  while(true);
+
+}
+
+//Calcula la temperatura y humedad
+void calcTempHum(){
+  h = dht.readHumidity();
+  t = dht.readTemperature();
+}
+
+//Muestra en el LCD la temperatura y humedad
+void showTempHum(){
+  char mensaje[16];
+  // Comprueba si la lectura falló. 
+  if (!isnan(t)) { 
+  sprintf(mensaje, "%.1f \337C ", t);
+  lcd.setCursor(3, 1);
+  lcd.print(mensaje); 
+  }
+
+  if (!isnan(h)) {
+  sprintf(mensaje, "%.0f %% ", h);
+  lcd.setCursor(15, 1);
+  lcd.print(mensaje); 
+  }
+}
+
+//Iniciar timer del lcd
+void startTimerLCD() {
+  if (!timerLCDactive) {
+    esp_timer_start_periodic(timer_lcd, 1000000);
+    timerLCDactive = true;
+    Serial.println("Timer LCD activo");
+  }
+}
+
+void stopTimerLCD() {
+  if (timerLCDactive) {
+    esp_timer_stop(timer_lcd);
+    timerLCDactive = false;
+    Serial.println("Timer LCD apagado");
+  }
+}
