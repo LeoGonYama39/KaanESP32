@@ -183,6 +183,38 @@ esp_timer_handle_t timer_firebase;
 volatile bool timerLCDactive = false;
 volatile bool timerFIREBASEactive = false;
 
+///////////Para el contador de tiempo/////////
+volatile unsigned long segundos_restantes =  86400UL;  //Este sería un día
+esp_timer_handle_t contador_timer;
+volatile bool timerDiasactive = false;
+unsigned int dias, horas, minutos, segundos;
+unsigned long restante;
+volatile bool dias_lcd = false;
+volatile bool dias_end = false;
+volatile bool parpadea = false;
+
+// Callback que se ejecuta cada segundo
+void IRAM_ATTR contador_callback(void* arg) {
+  
+  if (segundos_restantes > 0) {
+    segundos_restantes--;
+
+    restante = segundos_restantes;
+    dias = restante / 86400UL;
+    restante %= 86400UL;
+    horas = restante / 3600UL;
+    restante %= 3600UL;
+    minutos = restante / 60UL;
+    restante %= 60UL;
+    segundos = restante;
+
+    dias_lcd = true;
+    
+  } else {
+    parpadea = !parpadea;
+    dias_end = true;
+  }
+}
 
 //////////////////Interrupción del encoder/////////////////////////
 // Esta función se llama CADA vez que el pin CLK cambia
@@ -240,12 +272,18 @@ void setup() {
     .dispatch_method = ESP_TIMER_TASK,
     .name = "t2"
   };
-              
-  esp_timer_create(&args_lcd, &timer_lcd);     //Crea el timer
-  //esp_timer_start_periodic(timer_lcd, 1000000);       //Cada 1 segundo
 
+  // Configurar el timer
+  const esp_timer_create_args_t timer_args = {
+    .callback = &contador_callback,
+    .arg = NULL,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "contador_timer"
+  };
+              
+  esp_timer_create(&args_lcd, &timer_lcd);  
+  esp_timer_create(&timer_args, &contador_timer);
   esp_timer_create(&args_firebase, &timer_firebase);   
-  //esp_timer_start_periodic(timer_firebase, 10000000); //Cada 10 segundos
 
   // Iniciar LCD
   lcd.init();
@@ -311,7 +349,21 @@ void loop() {
     switch(currentState){
       case STATE_HOME: showTempHum(); break;
     }
+  }
 
+  //////Para contar los días
+  if (dias_lcd) {
+    dias_lcd = false;
+    switch(currentState){
+      case STATE_HOME: showTiempoRes(); break;
+    }
+  }
+
+  if(dias_end){
+    dias_end = false;
+    switch(currentState){
+      case STATE_HOME: parpadea ? showDiasCero() : showDiasClear(); break;
+    }
   }
 
   //////Para subir datos a firebase////////////
@@ -382,14 +434,12 @@ void handleStateLogic() {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
         needsRedraw = true;
-        startTimerLCD();
       }
 
       if (backPressed) {
         currentState = STATE_LIMIT;
         menuSelection = 0;
         needsRedraw = true;
-        startTimerLCD();
       }
       break;
 
@@ -398,14 +448,12 @@ void handleStateLogic() {
         currentState = STATE_MENU_MAIN;
         menuSelection = 0;
         needsRedraw = true;
-        startTimerLCD();
       }
 
       if (backPressed) {
         currentState = STATE_HOME;
         menuSelection = 0;
         needsRedraw = true;
-        startTimerLCD();
       }
       break;
 
@@ -562,6 +610,9 @@ void handleStateLogic() {
       }
       if (okPressed) {
         tiempo = editableValue;
+        stopTimerDias();                            //86400
+        segundos_restantes = (unsigned long) tiempo * 86400UL;
+        startTimerDias();
         currentState = STATE_HOME;
         needsRedraw = true;
       }
@@ -581,6 +632,7 @@ void handleStateLogic() {
           currentState = NEW_DIA;
           editableValue = tiempo; 
           stopTimerLCD();
+          stopTimerDias();
         } else { 
           currentState = STATE_MENU_MAIN;
         }
@@ -699,7 +751,9 @@ void handleStateLogic() {
           Serial.printf("Dias: %d, TempInf: %d, TempSup : %d, HumdInf: %d, HumdSup: %d\n", tiempo, tempInf, tempSup, humdInf, humdSup);
           sessionActive = true;
           currentState = STATE_HOME;
+          segundos_restantes = (unsigned long) tiempo * 86400UL;
           startTimerLCD();
+          startTimerDias();
         } else { 
           currentState = NEW_MAX_HUMD;
         }
@@ -765,7 +819,9 @@ void drawScreen() {
       lcd.write(223);
       lcd.print("C  H: ---%");
       lcd.setCursor(0, 2);
-      lcd.print("Rest.: 13d:04h:20m");
+      lcd.print("Tiempo restante:");
+      lcd.setCursor(0, 3);
+      lcd.print("--D --H --M --S");
       break;
 
     
@@ -1222,7 +1278,6 @@ void printEstado(){
 
 }
 
-
 //Imprime errores en el LCD
 //Como imprime un error, deja un while true para dejar el programa atorado aquí
 void showErrorLCD(int id){
@@ -1268,13 +1323,13 @@ void showTempHum(){
   }
 
   if (!isnan(h)) {
-  sprintf(mensaje, "%.0f %% ", h);
+  sprintf(mensaje, " %.0f%% ", h);
   lcd.setCursor(15, 1);
   lcd.print(mensaje); 
   }
 }
 
-//Iniciar timer del lcd
+
 void startTimerLCD() {
   if (!timerLCDactive) {
     esp_timer_start_periodic(timer_lcd, 1000000);
@@ -1282,11 +1337,45 @@ void startTimerLCD() {
     Serial.println("Timer LCD activo");
   }
 }
-
 void stopTimerLCD() {
   if (timerLCDactive) {
     esp_timer_stop(timer_lcd);
     timerLCDactive = false;
     Serial.println("Timer LCD apagado");
   }
+}
+//Iniciar timer del lcd
+void startTimerDias() {
+  if (!timerDiasactive) {
+    esp_timer_start_periodic(contador_timer, 1000000);
+    timerDiasactive = true;
+    Serial.println("Timer días activo");
+  }
+}
+void stopTimerDias() {
+  if (timerDiasactive) {
+    esp_timer_stop(contador_timer);
+    timerDiasactive = false;
+    Serial.println("Timer días apagado");
+  }
+}
+
+//Para mostrar que no queda tiempo restante
+void showDiasCero(){
+  lcd.setCursor(0, 3);
+  lcd.print("00D 00H 00M 00S");
+} 
+
+//Para no mostrar el tiempo, para que parpadese
+void showDiasClear(){
+  lcd.setCursor(0, 3);
+  lcd.print("                 ");
+}
+
+//Muestra el tiempo restante del contador
+void showTiempoRes(){
+  lcd.setCursor(0, 3);
+  char mensaje[20];
+  sprintf(mensaje, "%02luD %02luH %02luM %02luS", dias, horas, minutos, segundos);
+  lcd.print(mensaje);
 }
