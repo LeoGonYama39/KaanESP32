@@ -727,6 +727,7 @@ void handleStateLogic() {
           stopTimerLCD();
           stopTimerDias();
           stopTimerFirebase();
+          idCaja = siguienteID(idCaja); //Calcular la nueva id
         } else { 
           currentState = STATE_MENU_MAIN;
         }
