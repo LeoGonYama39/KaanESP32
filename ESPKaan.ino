@@ -20,13 +20,21 @@
 #include "DHT.h" 
 //Falta la del MPU
 #include <WiFi.h>
+#include <HTTPClient.h>   //Para conectarme al FireBase, por HTTPClient, no esp firebase
+#include <ArduinoJson.h>  //Para manipular json's
+#include "time.h"         //Para obtener el tiempo local
 
 #define DHTPIN 4                //Pin del sensor de temperatura y humedad
 #define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
 
 /////////ssid y password del wifi
-const char* ssid = "OTOÑO25";       
-const char* password = "Ib3r02025ui@"; 
+//const char* ssid = "OTOÑO25";       
+//const char* password = "Ib3r02025ui@"; 
+
+const char* ssid = "INFINITUMABD2_2.4";       
+const char* password = "2GJ98hx27P"; 
+
+String firebaseURL = "https://pruebaesp32kaan-default-rtdb.firebaseio.com/";
 
 //////////////////Pines/////////////////////////
 
@@ -160,6 +168,9 @@ bool lastBackState = HIGH; // Para detectar flanco de bajada
 int menuSelection = 0; // Selector de menú actual
 int editableValue = 1; // Para editar números
 bool sessionActive = false; // Flag para saber si hay una sesión
+
+//ID de la caja
+String idCaja = "";
 
 // Variables del limites y tiempo
 int tiempo = 7;
@@ -330,10 +341,69 @@ void setup() {
   lcd.print("|__________________|");
   setup_wifi();
 
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|  Sincronizando   |");
+  lcd.setCursor(0, 2);
+  lcd.print("|     fechas       |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+  initTimeLocal();
+
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|Buscando  sesiones|");
+  lcd.setCursor(0, 2);
+  lcd.print("|     activas      |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+  idCaja = obtenerCajaActiva();
+
+  if(!idCaja.length()){ //Si está vacío el string, no encontró cajas
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" __________________");
+    lcd.setCursor(0, 1);
+    lcd.print("|   Sin sesiones   |");
+    lcd.setCursor(0, 2);
+    lcd.print("|activas, iniciando|");
+    lcd.setCursor(0, 3);
+    lcd.print("|__________________|");
+    delay(3000);
+    idCaja = "1_ID";
+    sessionActive = false;
+  } else {
+
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" __________________");
+    lcd.setCursor(0, 1);
+    lcd.print("|Sesi");
+    lcd.write(3);
+    lcd.print("n  encontrada|");
+    lcd.setCursor(0, 2);
+    lcd.print("|  reanudando...   |");
+    lcd.setCursor(0, 3);
+    lcd.print("|__________________|");
+    leerInfoGeneral();
+    delay(3000);
+    sessionActive = true;
+  }
+
   //Decidir el estado inicial después del inicio
   //Si es que podemos cargar memoria
   if (sessionActive) {
+    segundos_restantes = (unsigned long) tiempo * 86400UL;
     currentState = STATE_HOME;
+    startTimerDias();
+    startTimerFirebase();
+    startTimerLCD();
   } else {
     currentState = STATE_NO_SESSION;
   }
@@ -389,6 +459,7 @@ void loop() {
   if (upload_firebase) {
     upload_firebase = false;
     Serial.println("Upload a firebase");
+    if (!isnan(t) && !isnan(h)) FiBaEnviarMedicion(t, h, false);
   }
 
 }
@@ -570,6 +641,7 @@ void handleStateLogic() {
         tempInf = auxTempInf;
         tempSup = auxTempSup;
         needsRedraw = true;
+        FiBaSetTemp(tempInf, tempSup);
       }
       if (backPressed) {
         currentState = EDIT_TEMP_MIN;
@@ -613,6 +685,7 @@ void handleStateLogic() {
         humdInf = auxHumdInf;
         humdSup = auxHumdSup;
         needsRedraw = true;
+        FiBaSetHumd(humdInf, humdSup);
       }
       if (backPressed) {
         currentState = EDIT_HUMD_MIN;
@@ -632,6 +705,7 @@ void handleStateLogic() {
         stopTimerDias();                            //86400
         segundos_restantes = (unsigned long) tiempo * 86400UL;
         startTimerDias();
+        FiBaSetDias(tiempo);
         currentState = STATE_HOME;
         needsRedraw = true;
       }
@@ -775,6 +849,7 @@ void handleStateLogic() {
           startTimerLCD();
           startTimerDias();
           startTimerFirebase();
+          subirInfoGeneral(tempInf, tempSup, humdInf, humdSup, tiempo);
         } else { 
           currentState = NEW_MAX_HUMD;
         }
@@ -834,7 +909,9 @@ void drawScreen() {
 
     
     case STATE_HOME:  //Pantalla que muestra los datos leídos
-      lcd.print("CAJA 01 [ACTIVA]");
+      lcd.print("CAJA ");
+      lcd.print(idCaja);
+      lcd.print(" [ACTIVA]");
       lcd.setCursor(0, 1);
       lcd.print("T: ---.- ");
       lcd.write(223);
@@ -1100,7 +1177,9 @@ void drawScreen() {
       lcd.setCursor(0, 1);
       lcd.print("Iniciar monitoreo");
       lcd.setCursor(0, 2);
-      lcd.print("Caja 02?"); 
+      lcd.print("Caja ");
+      lcd.print(idCaja);
+      lcd.print("?"); 
       lcd.setCursor(0, 3);
       lcd.print("> Iniciar");
       lcd.setCursor(10, 3);
@@ -1430,4 +1509,266 @@ void setup_wifi() {
   }
 
   Serial.println("\n¡Conectado a Internet!");
+}
+
+
+//Para iniciar una nueva medición
+void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHumdMax, int newDias) {
+  
+  //Como va a hacer una nueva medición, desactiva las anteriores
+  desactivarTodosLosMonitoreos();
+
+  StaticJsonDocument<300> doc;
+
+  doc["fecha_inicio"]     = generarFechaISO();
+  doc["temp_limite_min"]  = newTempMin;
+  doc["temp_limite_max"]  = newTempMax;
+  doc["humd_limite_min"]  = newHumdMin;
+  doc["humd_limite_max"]  = newHumdMax;
+  doc["dias"]             = newDias;
+  doc["activa"]           = true;   //Es la nueva medición y ya desactivé los otros, estará activo
+
+  // 2. Serializar a String
+  String json;
+  serializeJson(doc, json);
+
+  // 3. Enviar a Firebase con PUT
+  HTTPClient http;
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int codigo = http.PUT(json);
+
+  Serial.println("\n\nNUEVA MEDICIÓN:");
+  Serial.println(json);
+
+  if (codigo > 0) {
+    Serial.println("ÉXITO\n\n");
+  } else {
+    Serial.print("Error al enviar: ");
+    Serial.println(codigo);
+    Serial.print("\n");
+  }
+
+  http.end();
+}
+
+//Para obtener el json con todas las mediciones, necesito todos los id de las cajas para ponerlas en false
+String obtenerTodosLosMonitoreos() {
+  HTTPClient http;
+  String url = firebaseURL + "/monitoreos.json";
+
+  http.begin(url);
+  int codigo = http.GET();
+
+  if (codigo == 200) {
+    String payload = http.getString();
+    http.end();
+    return payload;
+  } else {
+    Serial.println("Error al obtener monitoreos");
+    http.end();
+    return "";
+  }
+}
+
+//Para obtener el json de los datos generales de una sesión ya iniciada/activa
+String obtenerInfoGeneral() {
+  HTTPClient http;
+
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  http.begin(url);
+
+  int code = http.GET();
+  if (code != 200) {
+    Serial.print("Error GET info_general: ");
+    Serial.println(code);
+    http.end();
+    return "";
+  }
+
+  String json = http.getString();
+  http.end();
+  return json;
+}
+
+void leerInfoGeneral() {
+  String json = obtenerInfoGeneral();
+  if (json == "") return;
+
+  StaticJsonDocument<1000> doc;
+  DeserializationError error = deserializeJson(doc, json);
+
+  if (error) {
+    Serial.println("Error parseando info_general");
+    return;
+  }
+
+  JsonObject info = doc.as<JsonObject>();
+
+  tiempo = info["dias"];
+  tempInf = info["temp_limite_min"];
+  tempSup = info["temp_limite_max"];
+  humdInf = info["humd_limite_min"];
+  humdSup = info["humd_limite_max"];
+}
+
+//Desactiva todas las mediciones activas. Después de esto, se debe de iniciar otra para que haya una activa
+void desactivarTodosLosMonitoreos() {
+  String json = obtenerTodosLosMonitoreos();
+  if (json == "") return;
+
+  //Reservar 5000 bytes para usarlos en el json
+  StaticJsonDocument<5000> doc; 
+  deserializeJson(doc, json);     //Convierte un String en un objeto JSON
+
+  //Recorrer todos los IDs
+  for (JsonPair caja : doc.as<JsonObject>()) {
+    String auxCaja = caja.key().c_str();
+    //.key obtiene el identificador 
+    //.c_str es como un toString()
+
+    //Hace el PATCH con la ruta adecuada, incluyendo el id de la caja obtenida
+    String url = firebaseURL + "/monitoreos/" + auxCaja + "/info_general.json";
+
+    HTTPClient http;
+    http.begin(url);
+    http.addHeader("Content-Type", "application/json");
+    int codigo = http.PATCH("{\"activa\": false}");     //Solicita que para esa caja, haga false en "activa"
+    http.end();
+  }
+}
+
+//Cambia los límites de temp en la firebase de la caja activa
+void FiBaSetTemp(int newTempInf, int newTempSup){
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  char patch[50]; 
+  sprintf(patch, "{\"temp_limite_min\": %d, \"temp_limite_max\": %d}", newTempInf, newTempSup);
+  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
+  if(codigo <= 0) Serial.println("\n\nError al cambiar las temperaturas en firebase\n");
+  http.end();
+}
+
+//Cambia los límites de humd en la firebase de la caja activa
+void FiBaSetHumd(int newHumdInf, int newHumdSup){
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  char patch[50]; 
+  sprintf(patch, "{\"humd_limite_min\": %d, \"humd_limite_max\": %d}", newHumdInf, newHumdSup);
+  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
+  if(codigo <= 0) Serial.println("\n\nError al cambiar las humedades en firebase\n");
+  http.end();
+}
+
+//Cambia los días en la firebase de la caja activa
+void FiBaSetDias(int newDias){
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  char patch[50]; 
+  sprintf(patch, "{\"dias\": %d}", newDias);
+  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
+  if(codigo <= 0) Serial.println("\n\nError al cambiar los días en firebase\n");
+  http.end();
+}
+
+void FiBaEnviarMedicion(float temperatura, float humedad, bool movimiento) {
+
+  StaticJsonDocument<200> doc;
+  doc["temperatura"] = temperatura;
+  doc["humedad"] = humedad;
+  doc["movimiento"] = movimiento;
+
+  String json;
+  serializeJson(doc, json);
+
+  String url = firebaseURL + "/monitoreos/" + idCaja +
+               "/datos_mediciones/" + generarFechaISO() + ".json";
+
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+
+  int codigo = http.PUT(json);
+
+  if (codigo > 0) {
+    Serial.println("\n\nMedición reigstrada\n");
+  } else {
+    Serial.print("\n\nError al registrar medición\n");
+  }
+
+  http.end();
+}
+
+//Obtiene el id de la caja activa actualmente 
+String obtenerCajaActiva() {
+    String json = obtenerTodosLosMonitoreos();
+    if (json == "") return "";
+
+    Serial.println(json);
+
+    StaticJsonDocument<6000> doc;
+    DeserializationError error = deserializeJson(doc, json);
+    if (error) {
+        Serial.println("Error al parsear JSON");
+        return "";
+    }
+
+    for (JsonPair caja : doc.as<JsonObject>()) {
+      String idCaja = caja.key().c_str();
+
+      //Obtengo el "activa" de esa caja/medición
+      bool activa = caja.value()["info_general"]["activa"];
+
+      //Esa caja es la activa
+      if (activa) return idCaja;
+      //Asumo que sólo hay una caja activa, esa será la activa
+    }
+
+    // Si ninguno tenía true
+    Serial.println("No hay caja activa");
+    return "";
+}
+
+//Obtener un string con la fecha
+String generarFechaISO() {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo)) {
+    return "1970-01-01T00:00:00Z"; // fallback
+  }
+
+  char buffer[30];
+  strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &timeinfo);
+  return String(buffer);
+}
+
+//Para poder sincronizar con el horario de cdmx
+void initTimeLocal(){
+  configTime(-6 * 3600, 0, "pool.ntp.org");
+  struct tm timeinfo;
+  while (!getLocalTime(&timeinfo)) {
+    Serial.println("Esperando hora NTP...");
+    delay(500);
+  }
+}
+
+
+String siguienteID(String idActual) {
+  int guion = idActual.indexOf('_');  //Obtener la posición del _
+  if (guion == -1) return "";         //Si no existe _
+
+  String numeroStr = idActual.substring(0, guion); //ibtiene String del número
+
+  int numero = numeroStr.toInt();   //Casteo
+
+  numero++; //incrementar
+  return String(numero) + "_ID";
 }
