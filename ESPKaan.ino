@@ -18,7 +18,7 @@
 #include <LiquidCrystal_I2C.h>
 #include "esp_timer.h"
 #include "DHT.h" 
-//Falta la del MPU
+#include <MPU6050.h>            //Para el acelerómetro y giroscopio
 #include <WiFi.h>
 #include <HTTPClient.h>   //Para conectarme al FireBase, por HTTPClient, no esp firebase
 #include <ArduinoJson.h>  //Para manipular json's
@@ -26,6 +26,8 @@
 
 #define DHTPIN 4                //Pin del sensor de temperatura y humedad
 #define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
+
+MPU6050 mpu;
 
 /////////ssid y password del wifi
 //const char* ssid = "OTOÑO25";       
@@ -187,9 +189,19 @@ int auxHumdSup = 90;
 int auxTempSup = 60;
 
 //Para temperatura y humedad
-float h, t;
+float h = 0.0, t = 0.0;
+float prevH = 0.0, prevT = 0.0;   //Es la medición previa, para determinar si necesito mandar los datos a actualizar o no
+#define UMBRAL 0.2                //Si el cambio pasa este umbral, manda a actualizar los datos
 DHT dht(DHTPIN, DHTTYPE);
 
+//Para movimiento
+const float UMBRAL_MOVIMIENTO = 40000.0;
+int16_t AccelX, AccelY, AccelZ;
+int16_t PrevAccelX = 0, PrevAccelY = 0, PrevAccelZ = 0;
+volatile bool sens_mov = false;
+esp_timer_handle_t timer_mov;  
+volatile bool movActive = false;
+volatile bool movDetected = false, prevMovDetected = false;
 
 ////////////Banderas para los timers///////////////
 volatile bool update_lcd = false;
@@ -253,6 +265,7 @@ void IRAM_ATTR timer_callback(void* arg) {
   switch(id){   //Levanta la bandera adecuada, dependiendo del arg
     case 1: update_lcd = true; break;
     case 2: upload_firebase = true; break; 
+    case 3: sens_mov = true; break;
   }
 
 }
@@ -291,6 +304,13 @@ void setup() {
     .name = "t2"
   };
 
+  esp_timer_create_args_t args_mov = {
+    .callback = &timer_callback,
+    .arg = (void*)3,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "flag_mov"
+  };
+
   // Configurar el timer
   const esp_timer_create_args_t timer_args = {
     .callback = &contador_callback,
@@ -301,7 +321,8 @@ void setup() {
               
   esp_timer_create(&args_lcd, &timer_lcd);  
   esp_timer_create(&timer_args, &contador_timer);
-  esp_timer_create(&args_firebase, &timer_firebase);   
+  esp_timer_create(&args_firebase, &timer_firebase);
+  esp_timer_create(&args_mov, &timer_mov);      
 
   // Iniciar LCD
   lcd.init();
@@ -318,79 +339,32 @@ void setup() {
 
   //////////////////Pantalla de inicio/////////////////////////
   currentState = STATE_SPLASH;
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(" __________________");
-  lcd.setCursor(0, 1);
-  lcd.print("|       Kaan       |");
-  lcd.setCursor(0, 2);
-  lcd.print("| Cuidar y guardar |");
-  lcd.setCursor(0, 3);
-  lcd.print("|__________________|");
+  printInit();
   delay(3000); 
 
+  mpu.initialize();
+  if (mpu.testConnection()){
+    Serial.println("Sensor iniciado correctamente");
+    mpu.getAcceleration(&PrevAccelX, &PrevAccelY, &PrevAccelZ);
+  } else {
+    Serial.println("Error al iniciar el sensor");
+    showErrorLCD(1);
+    while(true);
+  }
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(" __________________");
-  lcd.setCursor(0, 1);
-  lcd.print("|   Conectando a   |");
-  lcd.setCursor(0, 2);
-  lcd.print("|     red WiFi     |");
-  lcd.setCursor(0, 3);
-  lcd.print("|__________________|");
-  setup_wifi();
+  setup_wifi(true);
+  initTimeLocal(true);
 
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(" __________________");
-  lcd.setCursor(0, 1);
-  lcd.print("|  Sincronizando   |");
-  lcd.setCursor(0, 2);
-  lcd.print("|     fechas       |");
-  lcd.setCursor(0, 3);
-  lcd.print("|__________________|");
-  initTimeLocal();
-
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  lcd.print(" __________________");
-  lcd.setCursor(0, 1);
-  lcd.print("|Buscando  sesiones|");
-  lcd.setCursor(0, 2);
-  lcd.print("|     activas      |");
-  lcd.setCursor(0, 3);
-  lcd.print("|__________________|");
+  printSearchSesiones();
   idCaja = obtenerCajaActiva();
 
   if(!idCaja.length()){ //Si está vacío el string, no encontró cajas
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(" __________________");
-    lcd.setCursor(0, 1);
-    lcd.print("|   Sin sesiones   |");
-    lcd.setCursor(0, 2);
-    lcd.print("|activas, iniciando|");
-    lcd.setCursor(0, 3);
-    lcd.print("|__________________|");
+    printSesionOn();
     delay(3000);
     idCaja = "1_ID";
     sessionActive = false;
   } else {
-
-    lcd.clear();
-    lcd.setCursor(0, 0);
-    lcd.print(" __________________");
-    lcd.setCursor(0, 1);
-    lcd.print("|Sesi");
-    lcd.write(3);
-    lcd.print("n  encontrada|");
-    lcd.setCursor(0, 2);
-    lcd.print("|  reanudando...   |");
-    lcd.setCursor(0, 3);
-    lcd.print("|__________________|");
+    printSesionOff();
     leerInfoGeneral();
     delay(3000);
     sessionActive = true;
@@ -404,6 +378,7 @@ void setup() {
     startTimerDias();
     startTimerFirebase();
     startTimerLCD();
+    startTimerMov();
   } else {
     currentState = STATE_NO_SESSION;
   }
@@ -427,17 +402,6 @@ void loop() {
     backPressed = false;
     encoderIncrement = 0;
   }
-  
-  //////Para actualizar el lcd////////////
-  if (update_lcd) {
-    update_lcd = false;
-    calcTempHum();
-    Serial.printf("T: %.2f ºC, H: %.2f%\n", t, h);
-
-    switch(currentState){
-      case STATE_HOME: showTempHum(); break;
-    }
-  }
 
   //////Para contar los días
   if (dias_lcd) {
@@ -455,11 +419,60 @@ void loop() {
     }
   }
 
+  ////////Para detectar el movimiento, no requiero que lo haga en cada loop/////////
+  if(movActive){
+    mpu.getAcceleration(&AccelX, &AccelY, &AccelZ);
+
+    float deltaX = (float)abs(AccelX - PrevAccelX);
+    float deltaY = (float)abs(AccelY - PrevAccelY);
+    float deltaZ = (float)abs(AccelZ - PrevAccelZ);
+
+    float totalDelta = sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ);
+
+    prevMovDetected = movDetected;
+
+    if(UMBRAL_MOVIMIENTO < totalDelta){
+      movDetected = true;
+    } else {
+      movDetected = false;
+    }
+
+    if(prevMovDetected != movDetected){
+      if (movDetected){
+        Serial.println("Se movió");
+      } else {
+        Serial.println("Se dejó de mover xd");
+      }
+      
+    }
+
+    PrevAccelX = AccelX;
+    PrevAccelY = AccelY;
+    PrevAccelZ = AccelZ;
+  }
+
+  //////Para actualizar el lcd////////////
+  if (update_lcd) {
+    update_lcd = false;
+    calcTempHum();
+    switch(currentState){
+      case STATE_HOME: showTempHum(); break;
+    }
+    Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
+    if (!isnan(t) && !isnan(h)){
+      if (abs(prevT - t) >= UMBRAL || abs(prevH - h) >= UMBRAL) {
+        FiBaUpdateCurrData(t, h);
+      }
+    } 
+  }
+
   //////Para subir datos a firebase////////////
   if (upload_firebase) {
     upload_firebase = false;
     Serial.println("Upload a firebase");
-    if (!isnan(t) && !isnan(h)) FiBaEnviarMedicion(t, h, false);
+    if (!isnan(t) && !isnan(h)){
+      
+    } 
   }
 
 }
@@ -727,6 +740,7 @@ void handleStateLogic() {
           stopTimerLCD();
           stopTimerDias();
           stopTimerFirebase();
+          stopTimerMov();
           idCaja = siguienteID(idCaja); //Calcular la nueva id
         } else { 
           currentState = STATE_MENU_MAIN;
@@ -850,6 +864,7 @@ void handleStateLogic() {
           startTimerLCD();
           startTimerDias();
           startTimerFirebase();
+          startTimerMov();
           subirInfoGeneral(tempInf, tempSup, humdInf, humdSup, tiempo);
         } else { 
           currentState = NEW_MAX_HUMD;
@@ -1347,68 +1362,11 @@ void changeValor(){
 
 }
 
-//Imprime el estado actual
-void printEstado(){
-
-  String estadoNom;
-
-  switch (currentState) {
-    case STATE_SPLASH: estadoNom = "STATE_SPLASH"; break;
-    case STATE_HOME: estadoNom = "STATE_HOME"; break;
-    case STATE_NO_SESSION: estadoNom = "STATE_NO_SESSION"; break;
-    case STATE_MENU_MAIN: estadoNom = "STATE_MENU_MAIN"; break;
-    case STATE_MENU_MODIFY: estadoNom = "STATE_MENU_MODIFY"; break;
-    case STATE_EDIT_DIA: estadoNom = "STATE_EDIT_DIA"; break;
-    case STATE_NEW_WARN: estadoNom = "STATE_NEW_WARN"; break;
-    case NEW_DIA: estadoNom = "NEW_DIA"; break;
-    case NEW_MIN_TEMP: estadoNom = "NEW_MIN_TEMP"; break;
-    case NEW_MAX_TEMP: estadoNom = "NEW_MAX_TEMP"; break;
-    case NEW_MIN_HUMD: estadoNom = "NEW_MIN_HUMD"; break;
-    case NEW_MAX_HUMD: estadoNom = "NEW_MAX_HUMD"; break;
-    case STATE_NEW_CONFIRM: estadoNom = "STATE_NEW_CONFIRM"; break;
-    case EDIT_TEMP_MIN: estadoNom = "EDIT_TEMP_MIN"; break;
-    case EDIT_TEMP_MAX: estadoNom = "EDIT_TEMP_MAX"; break;
-    case EDIT_HUMD_MIN: estadoNom = "EDIT_HUMD_MIN"; break;
-    case EDIT_HUMD_MAX: estadoNom = "EDIT_HUMD_MAX"; break;
-    case STATE_LIMIT: estadoNom = "STATE_LIMIT"; break;
-    default: estadoNom = "DESCONOCIDO"; break;
-  }
-
-  Serial.print("Estado Actual: ");
-  Serial.println(estadoNom);
-
-}
-
-//Imprime errores en el LCD
-//Como imprime un error, deja un while true para dejar el programa atorado aquí
-void showErrorLCD(int id){
-
-  lcd.clear();
-  lcd.setCursor(0, 0);
-  switch(id){
-    case 0:
-      lcd.print("ERROR EN EL SENSOR DE");
-      lcd.setCursor(0, 1);
-      lcd.print("TEMP Y HUMD.");
-      lcd.print("ID ERROR: 0");
-      break;
-
-      case 1:
-      lcd.print("ERROR EN EL SENSOR ");
-      lcd.setCursor(0, 1);
-      lcd.print("ACELEROMETRO Y GIROS");
-      lcd.print("ID ERROR: 1");
-      break;
-
-      default: return; break;
-  }
-
-  while(true);
-
-}
 
 //Calcula la temperatura y humedad
 void calcTempHum(){
+  prevH = h;
+  prevT = t;
   h = dht.readHumidity();
   t = dht.readTemperature();
 }
@@ -1463,7 +1421,7 @@ void stopTimerDias() {
 
 void startTimerFirebase() {
   if (!timerFIREBASEactive) {
-    esp_timer_start_periodic(timer_firebase, 10000000);
+    esp_timer_start_periodic(timer_firebase, 3000000);
     timerFIREBASEactive = true;
     Serial.println("Timer Firebase activo");
   }
@@ -1475,6 +1433,23 @@ void stopTimerFirebase() {
     Serial.println("Timer Firebase apagado");
   }
 }
+
+void startTimerMov() {
+  if (!movActive) {
+    esp_timer_start_periodic(timer_mov, 100000);
+    movActive = true;
+    Serial.println("Timer mov activo");
+  }
+}
+void stopTimerMov() {
+  if (movActive) {
+    esp_timer_stop(timer_mov);
+    movActive = false;
+    Serial.println("Timer mov apagado");
+  }
+}
+
+
 
 //Para mostrar que no queda tiempo restante
 void showDiasCero(){
@@ -1496,11 +1471,14 @@ void showTiempoRes(){
   lcd.print(mensaje);
 }
 
-
-void setup_wifi() {
+//Conectar al internet
+//showLCD, para saber si necesita mostrar el aviso en LCD
+void setup_wifi(bool showLCD) {
   Serial.println();
   Serial.print("Conectando a: ");
   Serial.println(ssid);
+
+  if(showLCD) printConnectingWifi();
 
   WiFi.begin(ssid, password);
 
@@ -1527,7 +1505,10 @@ void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHum
   doc["humd_limite_min"]  = newHumdMin;
   doc["humd_limite_max"]  = newHumdMax;
   doc["dias"]             = newDias;
-  doc["activa"]           = true;   //Es la nueva medición y ya desactivé los otros, estará activo
+  doc["activa"]           = true;  
+  doc["temp"]             = -1; 
+  doc["humd"]             = -1; 
+  doc["mov"]              = false; 
 
   // 2. Serializar a String
   String json;
@@ -1655,6 +1636,23 @@ void FiBaSetTemp(int newTempInf, int newTempSup){
   http.end();
 }
 
+//Actualiza el dato de temperatura y humedad actual
+void FiBaUpdateCurrData(int newTemp, int newHumd){
+  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  HTTPClient http;
+  http.begin(url);
+  http.addHeader("Content-Type", "application/json");
+  char patch[50]; 
+  sprintf(patch, "{\"temp\": %d, \"humd\": %d}", newTemp, newHumd);
+  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
+  if(codigo <= 0){
+    Serial.println("\n\nError al actualizar datos en firebase\n");
+  } else {
+    Serial.println("              Datos actualizados");
+  }
+  http.end();
+}
+
 //Cambia los límites de humd en la firebase de la caja activa
 void FiBaSetHumd(int newHumdInf, int newHumdSup){
   String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1752,7 +1750,11 @@ String generarFechaISO() {
 }
 
 //Para poder sincronizar con el horario de cdmx
-void initTimeLocal(){
+//showLCD, para saber si necesita mostrar el aviso en LCD
+void initTimeLocal(bool showLCD){
+  
+  if(showLCD) printSincrFecha();
+  
   configTime(-6 * 3600, 0, "pool.ntp.org");
   struct tm timeinfo;
   while (!getLocalTime(&timeinfo)) {
@@ -1761,7 +1763,8 @@ void initTimeLocal(){
   }
 }
 
-
+//Obtiene el ID siguiente. El formato es x_ID, entonces no puedo sólo sumar y ya
+//Esta función obtiene el siguiente ID
 String siguienteID(String idActual) {
   int guion = idActual.indexOf('_');  //Obtener la posición del _
   if (guion == -1) return "";         //Si no existe _
@@ -1772,4 +1775,140 @@ String siguienteID(String idActual) {
 
   numero++; //incrementar
   return String(numero) + "_ID";
+}
+
+
+void printConnectingWifi(){
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|   Conectando a   |");
+  lcd.setCursor(0, 2);
+  lcd.print("|     red WiFi     |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+}
+
+//Imprimir el aviso del inicio
+void printInit(){
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|       Kaan       |");
+  lcd.setCursor(0, 2);
+  lcd.print("| Cuidar y guardar |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+}
+
+void printSincrFecha(){
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|  Sincronizando   |");
+  lcd.setCursor(0, 2);
+  lcd.print("|     fechas       |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+}
+
+void printSearchSesiones(){
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print(" __________________");
+  lcd.setCursor(0, 1);
+  lcd.print("|Buscando  sesiones|");
+  lcd.setCursor(0, 2);
+  lcd.print("|     activas      |");
+  lcd.setCursor(0, 3);
+  lcd.print("|__________________|");
+}
+
+void printSesionOn(){
+  lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" __________________");
+    lcd.setCursor(0, 1);
+    lcd.print("|   Sin sesiones   |");
+    lcd.setCursor(0, 2);
+    lcd.print("|activas, iniciando|");
+    lcd.setCursor(0, 3);
+    lcd.print("|__________________|");
+}
+
+void printSesionOff(){
+  lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" __________________");
+    lcd.setCursor(0, 1);
+    lcd.print("|Sesi");
+    lcd.write(3);
+    lcd.print("n  encontrada|");
+    lcd.setCursor(0, 2);
+    lcd.print("|  reanudando...   |");
+    lcd.setCursor(0, 3);
+    lcd.print("|__________________|");
+}
+
+//Imprime el estado actual
+void printEstado(){
+
+  String estadoNom;
+
+  switch (currentState) {
+    case STATE_SPLASH: estadoNom = "STATE_SPLASH"; break;
+    case STATE_HOME: estadoNom = "STATE_HOME"; break;
+    case STATE_NO_SESSION: estadoNom = "STATE_NO_SESSION"; break;
+    case STATE_MENU_MAIN: estadoNom = "STATE_MENU_MAIN"; break;
+    case STATE_MENU_MODIFY: estadoNom = "STATE_MENU_MODIFY"; break;
+    case STATE_EDIT_DIA: estadoNom = "STATE_EDIT_DIA"; break;
+    case STATE_NEW_WARN: estadoNom = "STATE_NEW_WARN"; break;
+    case NEW_DIA: estadoNom = "NEW_DIA"; break;
+    case NEW_MIN_TEMP: estadoNom = "NEW_MIN_TEMP"; break;
+    case NEW_MAX_TEMP: estadoNom = "NEW_MAX_TEMP"; break;
+    case NEW_MIN_HUMD: estadoNom = "NEW_MIN_HUMD"; break;
+    case NEW_MAX_HUMD: estadoNom = "NEW_MAX_HUMD"; break;
+    case STATE_NEW_CONFIRM: estadoNom = "STATE_NEW_CONFIRM"; break;
+    case EDIT_TEMP_MIN: estadoNom = "EDIT_TEMP_MIN"; break;
+    case EDIT_TEMP_MAX: estadoNom = "EDIT_TEMP_MAX"; break;
+    case EDIT_HUMD_MIN: estadoNom = "EDIT_HUMD_MIN"; break;
+    case EDIT_HUMD_MAX: estadoNom = "EDIT_HUMD_MAX"; break;
+    case STATE_LIMIT: estadoNom = "STATE_LIMIT"; break;
+    default: estadoNom = "DESCONOCIDO"; break;
+  }
+
+  Serial.print("Estado Actual: ");
+  Serial.println(estadoNom);
+
+}
+
+//Imprime errores en el LCD
+//Como imprime un error, deja un while true para dejar el programa atorado aquí
+void showErrorLCD(int id){
+
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  switch(id){
+    case 0:
+      lcd.print("ERROR EN EL SENSOR DE");
+      lcd.setCursor(0, 1);
+      lcd.print("TEMP Y HUMD.");
+      lcd.print("ID ERROR: 0");
+      break;
+
+      case 1:
+      lcd.print("ERROR EN EL SENSOR ");
+      lcd.setCursor(0, 1);
+      lcd.print("ACELEROMETRO Y GIROS");
+      lcd.print("ID ERROR: 1");
+      break;
+
+      default: return; break;
+  }
+
+  while(true);
+
 }
