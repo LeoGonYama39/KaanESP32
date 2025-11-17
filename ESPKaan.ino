@@ -270,6 +270,16 @@ void IRAM_ATTR timer_callback(void* arg) {
 
 }
 
+//////////Para poner en el núcleo 1 (no el 0), las tareas del firebase, no trabará la línea principal)
+//Struct que se enviará a la cola. Tiene los datos para hacer el patch, put, etc
+struct HttpTask {
+  String endpoint;  //como el link
+  String payload;   //los datos a parchear o postear o put, etc
+  String method;    //patch, post, put
+};
+//Variable de la cola
+QueueHandle_t colaHTTP;
+
 //////////////////Setup/////////////////////////
 void setup() {
   Serial.begin(115200);
@@ -288,8 +298,22 @@ void setup() {
   // Activar la interrupción en el pin CLK
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), readEncoderISR, CHANGE);
 
-  /////////////////////Setup de los timers//////////////////////////////
+  /////////////////////Setup del núcleo 1////////////////////
+  //Puede poner a la cola hasta 10 peticiones
+  //sizeof, es el tamaño de lo que recibirá la cola (apuntador del struct)
+  colaHTTP = xQueueCreate(10, sizeof(HttpTask*));
 
+  xTaskCreatePinnedToCore(
+    httpTask,       //la función que ejecuta la tarea
+    "HTTP Task",    //nombre de la tarea (solo para debug)
+    10000,          //tamaño de stack (en palabras, NO bytes)
+    NULL,           //parámetro enviado a la tarea
+    1,              //prioridad (0 baja, 3 media, 5 alta, etc)
+    NULL,           //handle de la tarea (no lo ocupo)
+    1               //núcleo donde se ejecutará (0 o 1)
+  );
+
+  /////////////////////Setup de los timers//////////////////////////////
   // Configura el timer periódico
   const esp_timer_create_args_t args_lcd = {
     .callback = &timer_callback,        //Apuntador de la función
@@ -461,6 +485,7 @@ void loop() {
     Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
     if (!isnan(t) && !isnan(h)){
       if (abs(prevT - t) >= UMBRAL || abs(prevH - h) >= UMBRAL) {
+        Serial.println("Cambio detectado, cambiando en firebase");
         FiBaUpdateCurrData(t, h);
       }
     } 
@@ -1421,7 +1446,7 @@ void stopTimerDias() {
 
 void startTimerFirebase() {
   if (!timerFIREBASEactive) {
-    esp_timer_start_periodic(timer_firebase, 3000000);
+    esp_timer_start_periodic(timer_firebase, 10000000);
     timerFIREBASEactive = true;
     Serial.println("Timer Firebase activo");
   }
@@ -1493,8 +1518,8 @@ void setup_wifi(bool showLCD) {
 
 //Para iniciar una nueva medición
 void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHumdMax, int newDias) {
-  
-  //Como va a hacer una nueva medición, desactiva las anteriores
+
+  //Desactiva todos los monitoreos anteriores
   desactivarTodosLosMonitoreos();
 
   StaticJsonDocument<300> doc;
@@ -1510,32 +1535,18 @@ void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHum
   doc["humd"]             = -1; 
   doc["mov"]              = false; 
 
-  // 2. Serializar a String
   String json;
   serializeJson(doc, json);
 
-  // 3. Enviar a Firebase con PUT
-  HTTPClient http;
-  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  HttpTask *t = new HttpTask;
 
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->method   = "PUT";
+  t->payload  = json;  
 
-  int codigo = http.PUT(json);
-
-  Serial.println("\n\nNUEVA MEDICIÓN:");
-  Serial.println(json);
-
-  if (codigo > 0) {
-    Serial.println("ÉXITO\n\n");
-  } else {
-    Serial.print("Error al enviar: ");
-    Serial.println(codigo);
-    Serial.print("\n");
-  }
-
-  http.end();
+  xQueueSend(colaHTTP, &t, 0);
 }
+
 
 //Para obtener el json con todas las mediciones, necesito todos los id de las cajas para ponerlas en false
 String obtenerTodosLosMonitoreos() {
@@ -1623,90 +1634,93 @@ void desactivarTodosLosMonitoreos() {
   }
 }
 
+
+void httpTask(void * parameter) {
+  HttpTask *tarea;
+
+  for (;;) {  //Es como un while(true)
+    if (xQueueReceive(colaHTTP, &tarea, portMAX_DELAY) == pdTRUE) {
+
+      HTTPClient http;
+      http.begin(tarea->endpoint);
+      http.addHeader("Content-Type", "application/json");
+
+      int code = -1;
+      if (tarea->method == "PATCH") code = http.PATCH(tarea->payload);
+      else if (tarea->method == "PUT") code = http.PUT(tarea->payload);
+      else if (tarea->method == "POST") code = http.POST(tarea->payload);
+      http.end();
+
+      delete tarea;   // <-- liberar memoria
+    }
+  }
+}
+
 //Cambia los límites de temp en la firebase de la caja activa
 void FiBaSetTemp(int newTempInf, int newTempSup){
-  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  char patch[50]; 
-  sprintf(patch, "{\"temp_limite_min\": %d, \"temp_limite_max\": %d}", newTempInf, newTempSup);
-  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
-  if(codigo <= 0) Serial.println("\n\nError al cambiar las temperaturas en firebase\n");
-  http.end();
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"temp_limite_min\": " + String(newTempInf) + ", \"temp_limite_max\": " + String(newTempSup) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0); 
 }
 
 //Actualiza el dato de temperatura y humedad actual
-void FiBaUpdateCurrData(int newTemp, int newHumd){
-  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  char patch[50]; 
-  sprintf(patch, "{\"temp\": %d, \"humd\": %d}", newTemp, newHumd);
-  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
-  if(codigo <= 0){
-    Serial.println("\n\nError al actualizar datos en firebase\n");
-  } else {
-    Serial.println("              Datos actualizados");
-  }
-  http.end();
+void FiBaUpdateCurrData(int newTemp, int newHumd) {
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"temp\": " + String(newTemp) + ", \"humd\": " + String(newHumd) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0); 
 }
 
 //Cambia los límites de humd en la firebase de la caja activa
 void FiBaSetHumd(int newHumdInf, int newHumdSup){
-  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  char patch[50]; 
-  sprintf(patch, "{\"humd_limite_min\": %d, \"humd_limite_max\": %d}", newHumdInf, newHumdSup);
-  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
-  if(codigo <= 0) Serial.println("\n\nError al cambiar las humedades en firebase\n");
-  http.end();
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"humd_limite_min\": " + String(newHumdInf) + ", \"humd_limite_max\": " + String(newHumdSup) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0); 
 }
 
 //Cambia los días en la firebase de la caja activa
 void FiBaSetDias(int newDias){
-  String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-  char patch[50]; 
-  sprintf(patch, "{\"dias\": %d}", newDias);
-  int codigo = http.PATCH(patch);     //Solicita que para esa caja, haga false en "activa"
-  if(codigo <= 0) Serial.println("\n\nError al cambiar los días en firebase\n");
-  http.end();
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"dias\": " + String(newDias) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0);
 }
 
-void FiBaEnviarMedicion(float temperatura, float humedad, bool movimiento) {
+void FiBaEnviarMedicion(float temperatura, float humedad) {
 
+  // Construir JSON
   StaticJsonDocument<200> doc;
   doc["temperatura"] = temperatura;
   doc["humedad"] = humedad;
-  doc["movimiento"] = movimiento;
 
   String json;
   serializeJson(doc, json);
 
-  String url = firebaseURL + "/monitoreos/" + idCaja +
-               "/datos_mediciones/" + generarFechaISO() + ".json";
+  // Crear la tarea en heap
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja +
+                "/datos_mediciones/" + generarFechaISO() + ".json";
 
-  HTTPClient http;
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
+  t->method = "PUT";
+  t->payload = json;   // <-- esto es totalmente válido
 
-  int codigo = http.PUT(json);
-
-  if (codigo > 0) {
-    Serial.println("\n\nMedición reigstrada\n");
-  } else {
-    Serial.print("\n\nError al registrar medición\n");
-  }
-
-  http.end();
+  // Enviar a la cola
+  xQueueSend(colaHTTP, &t, 0);
 }
-
 //Obtiene el id de la caja activa actualmente 
 String obtenerCajaActiva() {
     String json = obtenerTodosLosMonitoreos();
