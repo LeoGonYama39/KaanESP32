@@ -193,6 +193,8 @@ float h = 0.0, t = 0.0;
 float prevH = 0.0, prevT = 0.0;   //Es la medición previa, para determinar si necesito mandar los datos a actualizar o no
 #define UMBRAL 0.2                //Si el cambio pasa este umbral, manda a actualizar los datos
 DHT dht(DHTPIN, DHTTYPE);
+volatile bool alertT = false, alertH = false;   //Para indicar si se superó el límite o no
+volatile bool blinkTempHumd = false;            //Para que parpadee si se pasó del límite
 
 //Para movimiento
 const float UMBRAL_MOVIMIENTO = 40000.0;
@@ -220,6 +222,7 @@ unsigned long restante;
 volatile bool dias_lcd = false;
 volatile bool dias_end = false;
 volatile bool parpadea = false;
+
 
 // Callback que se ejecuta cada segundo
 void IRAM_ATTR contador_callback(void* arg) {
@@ -478,17 +481,46 @@ void loop() {
   //////Para actualizar el lcd////////////
   if (update_lcd) {
     update_lcd = false;
+    blinkTempHumd = !blinkTempHumd;
     calcTempHum();
-    switch(currentState){
-      case STATE_HOME: showTempHum(); break;
-    }
     Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
     if (!isnan(t) && !isnan(h)){
       if (abs(prevT - t) >= UMBRAL || abs(prevH - h) >= UMBRAL) {
         Serial.println("Cambio detectado, cambiando en firebase");
         FiBaUpdateCurrData(t, h);
       }
-    } 
+      alertT = cmprTemp();
+      alertH = cmprHumd();
+
+      if(alertT) Serial.println("Alerta en temperatura");
+      if(alertH) Serial.println("Alerta en humedad");
+
+      switch(currentState){
+        case STATE_HOME: 
+          if(alertT){
+            if(blinkTempHumd){
+              showTemp();
+            } else {
+              clearTemp();
+            }
+          } else {
+            showTemp();
+          }
+
+          if(alertH){
+            if(blinkTempHumd){
+              showHumd();
+            } else {
+              clearHumd();
+            }
+          } else {
+            showHumd();
+          }
+          break;
+      }
+
+    }
+
   }
 
   //////Para subir datos a firebase////////////
@@ -496,10 +528,59 @@ void loop() {
     upload_firebase = false;
     Serial.println("Upload a firebase");
     if (!isnan(t) && !isnan(h)){
-      
+      FiBaEnviarMedicion(t, h);
     } 
   }
+}
 
+void showTemp(){
+  char mensaje[16];
+  if (!isnan(t)) { 
+    sprintf(mensaje, "%.1f \337C ", t);
+    lcd.setCursor(3, 1);
+    lcd.print(mensaje); 
+  }
+}
+
+void clearTemp(){
+  if (!isnan(t)) { 
+    lcd.setCursor(3, 1);
+    lcd.print("        "); 
+  }
+}
+
+void showHumd(){
+  char mensaje[16];
+  if (!isnan(h)) {
+    sprintf(mensaje, " %.0f%% ", h);
+    lcd.setCursor(15, 1);
+    lcd.print(mensaje); 
+  }
+}
+
+void clearHumd(){
+  char mensaje[16];
+  if (!isnan(t)) { 
+    lcd.setCursor(15, 1);
+    lcd.print("    "); 
+  }
+}
+
+//Muestra en el LCD la temperatura y humedad
+void showTempHum(){
+  char mensaje[16];
+  // Comprueba si la lectura falló. 
+  if (!isnan(t)) { 
+  sprintf(mensaje, "%.1f \337C ", t);
+  lcd.setCursor(3, 1);
+  lcd.print(mensaje); 
+  }
+
+  if (!isnan(h)) {
+  sprintf(mensaje, " %.0f%% ", h);
+  lcd.setCursor(15, 1);
+  lcd.print(mensaje); 
+  }
 }
 
 //////////////////Manejo de inputs/////////////////////////
@@ -1396,22 +1477,7 @@ void calcTempHum(){
   t = dht.readTemperature();
 }
 
-//Muestra en el LCD la temperatura y humedad
-void showTempHum(){
-  char mensaje[16];
-  // Comprueba si la lectura falló. 
-  if (!isnan(t)) { 
-  sprintf(mensaje, "%.1f \337C ", t);
-  lcd.setCursor(3, 1);
-  lcd.print(mensaje); 
-  }
 
-  if (!isnan(h)) {
-  sprintf(mensaje, " %.0f%% ", h);
-  lcd.setCursor(15, 1);
-  lcd.print(mensaje); 
-  }
-}
 
 
 void startTimerLCD() {
@@ -1609,6 +1675,9 @@ void leerInfoGeneral() {
 }
 
 //Desactiva todas las mediciones activas. Después de esto, se debe de iniciar otra para que haya una activa
+//Este lo dejaré en el núcleo 0
+//Siempre sólo se ejecutará este, sin interrumpir el loop
+//Pueden ser más de 10
 void desactivarTodosLosMonitoreos() {
   String json = obtenerTodosLosMonitoreos();
   if (json == "") return;
@@ -1925,4 +1994,24 @@ void showErrorLCD(int id){
 
   while(true);
 
+}
+
+//Para ver si la temp se salió de los límites
+bool cmprTemp(){
+  if((t < tempInf) || (t > tempSup)){
+    return true;
+  } else {
+    return false;
+  }
+  return false;
+}
+
+//Para ver si la humd se salió de los límites
+bool cmprHumd(){
+  if((h < humdInf) || (h > humdSup)){
+    return true;
+  } else {
+    return false;
+  }
+  return false;
 }
