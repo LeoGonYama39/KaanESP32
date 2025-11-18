@@ -36,6 +36,9 @@ MPU6050 mpu;
 const char* ssid = "INFINITUMABD2_2.4";       
 const char* password = "2GJ98hx27P"; 
 
+//const char* ssid = "motoLeoDatos";       
+//const char* password = ""; 
+
 String firebaseURL = "https://pruebaesp32kaan-default-rtdb.firebaseio.com/";
 
 //////////////////Pines/////////////////////////
@@ -197,13 +200,14 @@ volatile bool alertT = false, alertH = false;   //Para indicar si se superó el 
 volatile bool blinkTempHumd = false;            //Para que parpadee si se pasó del límite
 
 //Para movimiento
-const float UMBRAL_MOVIMIENTO = 40000.0;
+const float UMBRAL_MOVIMIENTO = 20000.0;
 int16_t AccelX, AccelY, AccelZ;
 int16_t PrevAccelX = 0, PrevAccelY = 0, PrevAccelZ = 0;
 volatile bool sens_mov = false;
 esp_timer_handle_t timer_mov;  
 volatile bool movActive = false;
 volatile bool movDetected = false, prevMovDetected = false;
+int restCount = 0;    //Para que, cuando detecte movimiento, no permita volver a detectar por 20 (50ms x 20 = 2 s) interaciones. Esto evita que se envíen muchos request
 
 ////////////Banderas para los timers///////////////
 volatile bool update_lcd = false;
@@ -212,6 +216,11 @@ esp_timer_handle_t timer_lcd;
 esp_timer_handle_t timer_firebase;    
 volatile bool timerLCDactive = false;
 volatile bool timerFIREBASEactive = false;
+
+//Para enviar cada minuto lo restante del timer para poder recuperarlo
+esp_timer_handle_t timer_timer_firebase;  
+volatile bool update_timer = false;
+volatile bool timerTimerActive = false;
 
 ///////////Para el contador de tiempo/////////
 volatile unsigned long segundos_restantes =  86400UL;  //Este sería un día
@@ -227,26 +236,39 @@ volatile bool parpadea = false;
 // Callback que se ejecuta cada segundo
 void IRAM_ATTR contador_callback(void* arg) {
   
-  if (segundos_restantes > 0) {   //Si no ha acabado...
-    segundos_restantes--;
+  int id = (int)arg;
 
-    //Fórmulas para cambiar el tiempo restante en días, horas, minutos y segundos
-    restante = segundos_restantes;
-    dias = restante / 86400UL;
-    restante %= 86400UL;
-    horas = restante / 3600UL;
-    restante %= 3600UL;
-    minutos = restante / 60UL;
-    restante %= 60UL;
-    segundos = restante;
 
-    //Para disparar la función de actaulizar el lcd
-    dias_lcd = true;
-    
-  } else {    //Si ya acabó
-    parpadea = !parpadea;   //Variable que intercala entre true y false, para que el tiempo parpadee cuando haya acabado
-    dias_end = true;        //Dispara la función para indicar que acabó el tiempo
+  switch(id){
+    case 1:
+    if (segundos_restantes > 0) {   //Si no ha acabado...
+      segundos_restantes--;
+
+      //Fórmulas para cambiar el tiempo restante en días, horas, minutos y segundos
+      restante = segundos_restantes;
+      dias = restante / 86400UL;
+      restante %= 86400UL;
+      horas = restante / 3600UL;
+      restante %= 3600UL;
+      minutos = restante / 60UL;
+      restante %= 60UL;
+      segundos = restante;
+
+      //Para disparar la función de actaulizar el lcd
+      dias_lcd = true;
+      
+    } else {    //Si ya acabó
+      parpadea = !parpadea;   //Variable que intercala entre true y false, para que el tiempo parpadee cuando haya acabado
+      dias_end = true;        //Dispara la función para indicar que acabó el tiempo
+    }
+    break;
+
+    case 2:
+      update_timer = true; 
+      break;
+
   }
+  
 }
 
 //////////////////Interrupción del encoder/////////////////////////
@@ -301,6 +323,9 @@ void setup() {
   // Activar la interrupción en el pin CLK
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), readEncoderISR, CHANGE);
 
+  //Activar los onEvent de wifi, para actuar frente a situaciones como desconección del wifi
+  WiFi.onEvent(WiFiEvent);
+
   /////////////////////Setup del núcleo 1////////////////////
   //Puede poner a la cola hasta 10 peticiones
   //sizeof, es el tamaño de lo que recibirá la cola (apuntador del struct)
@@ -338,10 +363,17 @@ void setup() {
     .name = "flag_mov"
   };
 
+  esp_timer_create_args_t args_timer_timer = {
+    .callback = &contador_callback,
+    .arg = (void*)2,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "flag_timer_timer"
+  };
+
   // Configurar el timer
   const esp_timer_create_args_t timer_args = {
     .callback = &contador_callback,
-    .arg = NULL,
+    .arg = (void*)1,
     .dispatch_method = ESP_TIMER_TASK,
     .name = "contador_timer"
   };
@@ -349,7 +381,8 @@ void setup() {
   esp_timer_create(&args_lcd, &timer_lcd);  
   esp_timer_create(&timer_args, &contador_timer);
   esp_timer_create(&args_firebase, &timer_firebase);
-  esp_timer_create(&args_mov, &timer_mov);      
+  esp_timer_create(&args_mov, &timer_mov); 
+  esp_timer_create(&args_timer_timer, &timer_timer_firebase);      
 
   // Iniciar LCD
   lcd.init();
@@ -380,6 +413,7 @@ void setup() {
   }
 
   setup_wifi(true);
+  delay(3000);
   initTimeLocal(true);
 
   printSearchSesiones();
@@ -400,16 +434,16 @@ void setup() {
   //Decidir el estado inicial después del inicio
   //Si es que podemos cargar memoria
   if (sessionActive) {
-    segundos_restantes = (unsigned long) tiempo * 86400UL;
     currentState = STATE_HOME;
     startTimerDias();
     startTimerFirebase();
     startTimerLCD();
     startTimerMov();
+    startTimerTimer();
   } else {
     currentState = STATE_NO_SESSION;
   }
-  
+
   //Dibujar la primera pantalla
   drawScreen(); 
 }
@@ -447,7 +481,8 @@ void loop() {
   }
 
   ////////Para detectar el movimiento, no requiero que lo haga en cada loop/////////
-  if(movActive){
+  if (sens_mov) {
+    sens_mov = false;
     mpu.getAcceleration(&AccelX, &AccelY, &AccelZ);
 
     float deltaX = (float)abs(AccelX - PrevAccelX);
@@ -456,21 +491,31 @@ void loop() {
 
     float totalDelta = sqrt(deltaX*deltaX + deltaY*deltaY + deltaZ*deltaZ);
 
-    prevMovDetected = movDetected;
+    //Si ya detectó movimiento
+    if (movDetected) {
+        //Leo si se movió
+        if (totalDelta > UMBRAL_MOVIMIENTO) {
+            restCount = 0;  //Se sigue moviendo aún cuando ya detectó movimiento, reseteo el contador
+        } else {
+            restCount++;    //Ya no se mueve, cuento
 
-    if(UMBRAL_MOVIMIENTO < totalDelta){
-      movDetected = true;
-    } else {
-      movDetected = false;
+            if (restCount >= 6) {   //Ya pasaron 6 ciclos * 500ms = 3 sin moverse, ya no se está moviendo
+                movDetected = false;
+                restCount = 0;
+                Serial.println("Dejó de moverse");
+                FiBaSetMov(false);
+            }
+        }
     }
 
-    if(prevMovDetected != movDetected){
-      if (movDetected){
-        Serial.println("Se movió");
-      } else {
-        Serial.println("Se dejó de mover xd");
-      }
-      
+    //No detectó movimiento
+    else {
+        if (totalDelta > UMBRAL_MOVIMIENTO) {   //Se movió
+            movDetected = true;                 //Activo que se movió para que en el siguiente ciclo, cuente
+            restCount = 0;                      //Rereteo el contador
+            Serial.println("Se movió");
+            FiBaSetMov(true);
+        }
     }
 
     PrevAccelX = AccelX;
@@ -483,7 +528,7 @@ void loop() {
     update_lcd = false;
     blinkTempHumd = !blinkTempHumd;
     calcTempHum();
-    Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
+    //Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
     if (!isnan(t) && !isnan(h)){
       if (abs(prevT - t) >= UMBRAL || abs(prevH - h) >= UMBRAL) {
         Serial.println("Cambio detectado, cambiando en firebase");
@@ -531,6 +576,15 @@ void loop() {
       FiBaEnviarMedicion(t, h);
     } 
   }
+
+  //Para mandar cada minuto la actualización del timer
+  //Puedo recuperar un timer que ya haya iniciado
+  if(update_timer){
+    update_timer = false;
+    Serial.println("Cambio del timer mandado");
+    FiBiSetTimerRest(segundos_restantes);
+  }
+
 }
 
 void showTemp(){
@@ -754,13 +808,20 @@ void handleStateLogic() {
         needsRedraw = false;
       }
       if (okPressed) {
-        auxTempSup = editableValue; 
-        currentState = STATE_HOME;
-        menuSelection = 0;
-        tempInf = auxTempInf;
-        tempSup = auxTempSup;
-        needsRedraw = true;
-        FiBaSetTemp(tempInf, tempSup);
+        if(checkConnection()){
+          auxTempSup = editableValue; 
+          currentState = STATE_HOME;
+          menuSelection = 0;
+          tempInf = auxTempInf;
+          tempSup = auxTempSup;
+          needsRedraw = true;
+          FiBaSetTemp(tempInf, tempSup);
+        } else {
+          currentState = STATE_HOME;
+          needsRedraw = true;
+          menuSelection = 0;
+        }
+        
       }
       if (backPressed) {
         currentState = EDIT_TEMP_MIN;
@@ -798,13 +859,19 @@ void handleStateLogic() {
         needsRedraw = false;
       }
       if (okPressed) {
-        auxHumdSup = editableValue; 
-        currentState = STATE_HOME;
-        menuSelection = 0;
-        humdInf = auxHumdInf;
-        humdSup = auxHumdSup;
-        needsRedraw = true;
-        FiBaSetHumd(humdInf, humdSup);
+        if(checkConnection()){
+          auxHumdSup = editableValue; 
+          currentState = STATE_HOME;
+          menuSelection = 0;
+          humdInf = auxHumdInf;
+          humdSup = auxHumdSup;
+          needsRedraw = true;
+          FiBaSetHumd(humdInf, humdSup);
+        } else {
+          needsRedraw = true;
+          currentState = STATE_HOME;
+          menuSelection = 0;
+        }
       }
       if (backPressed) {
         currentState = EDIT_HUMD_MIN;
@@ -820,13 +887,21 @@ void handleStateLogic() {
         needsRedraw = false;
       }
       if (okPressed) {
-        tiempo = editableValue;
-        stopTimerDias();                            //86400
-        segundos_restantes = (unsigned long) tiempo * 86400UL;
-        startTimerDias();
-        FiBaSetDias(tiempo);
-        currentState = STATE_HOME;
-        needsRedraw = true;
+        if(checkConnection()){
+          tiempo = editableValue;
+          stopTimerDias();                            //86400
+          stopTimerTimer();
+          segundos_restantes = (unsigned long) tiempo * 86400UL;
+          startTimerDias();
+          startTimerTimer();
+          FiBaSetDias(segundos_restantes);
+          currentState = STATE_HOME;
+          needsRedraw = true;
+        } else {
+          currentState = STATE_HOME;
+          needsRedraw = true;
+        }
+        
       }
       if (backPressed) {
         currentState = STATE_MENU_MODIFY;
@@ -847,6 +922,7 @@ void handleStateLogic() {
           stopTimerDias();
           stopTimerFirebase();
           stopTimerMov();
+          stopTimerTimer();
           idCaja = siguienteID(idCaja); //Calcular la nueva id
         } else { 
           currentState = STATE_MENU_MAIN;
@@ -962,16 +1038,22 @@ void handleStateLogic() {
       }
       if (okPressed) {
         if (menuSelection == 0) { 
-          Serial.println("--- NUEVA SESION INICIADA ---");
-          Serial.printf("Dias: %d, TempInf: %d, TempSup : %d, HumdInf: %d, HumdSup: %d\n", tiempo, tempInf, tempSup, humdInf, humdSup);
-          sessionActive = true;
-          currentState = STATE_HOME;
-          segundos_restantes = (unsigned long) tiempo * 86400UL;
-          startTimerLCD();
-          startTimerDias();
-          startTimerFirebase();
-          startTimerMov();
-          subirInfoGeneral(tempInf, tempSup, humdInf, humdSup, tiempo);
+          if(checkConnection()){
+            Serial.println("--- NUEVA SESION INICIADA ---");
+            Serial.printf("Dias: %d, TempInf: %d, TempSup : %d, HumdInf: %d, HumdSup: %d\n", tiempo, tempInf, tempSup, humdInf, humdSup);
+            sessionActive = true;
+            currentState = STATE_HOME;
+            segundos_restantes = (unsigned long) tiempo * 86400UL;
+            startTimerLCD();
+            startTimerDias();
+            startTimerFirebase();
+            startTimerMov();
+            startTimerTimer();
+            subirInfoGeneral(tempInf, tempSup, humdInf, humdSup, segundos_restantes);
+          } else {
+            currentState = STATE_NEW_CONFIRM;
+          }
+          
         } else { 
           currentState = NEW_MAX_HUMD;
         }
@@ -1478,8 +1560,6 @@ void calcTempHum(){
 }
 
 
-
-
 void startTimerLCD() {
   if (!timerLCDactive) {
     esp_timer_start_periodic(timer_lcd, 1000000);
@@ -1526,8 +1606,8 @@ void stopTimerFirebase() {
 }
 
 void startTimerMov() {
-  if (!movActive) {
-    esp_timer_start_periodic(timer_mov, 100000);
+  if (!movActive) {                     
+    esp_timer_start_periodic(timer_mov, 500000);
     movActive = true;
     Serial.println("Timer mov activo");
   }
@@ -1540,6 +1620,20 @@ void stopTimerMov() {
   }
 }
 
+void startTimerTimer() {
+  if (!timerTimerActive) {                          
+    esp_timer_start_periodic(timer_timer_firebase, 60000000);
+    timerTimerActive = true;
+    Serial.println("Timer timer activo");
+  }
+}
+void stopTimerTimer() {
+  if (timerTimerActive) {
+    esp_timer_stop(timer_timer_firebase);
+    timerTimerActive = false;
+    Serial.println("Timer timer apagado");
+  }
+}
 
 
 //Para mostrar que no queda tiempo restante
@@ -1564,26 +1658,34 @@ void showTiempoRes(){
 
 //Conectar al internet
 //showLCD, para saber si necesita mostrar el aviso en LCD
-void setup_wifi(bool showLCD) {
-  Serial.println();
-  Serial.print("Conectando a: ");
-  Serial.println(ssid);
-
-  if(showLCD) printConnectingWifi();
-
-  WiFi.begin(ssid, password);
-
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
+void setup_wifi(bool showLCD) { 
+  Serial.println(); 
+  Serial.print("Conectando a: "); 
+  Serial.println(ssid); 
+  
+  if(showLCD) printConnectingWifi(); 
+  WiFi.begin(ssid, password); 
+  
+  while (WiFi.status() != WL_CONNECTED) { 
+    delay(500); 
+    Serial.print("."); 
+    } 
+    
+  Serial.println("\n¡Conectado a Internet!"); 
   }
 
-  Serial.println("\n¡Conectado a Internet!");
-}
+
 
 
 //Para iniciar una nueva medición
-void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHumdMax, int newDias) {
+void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHumdMax, unsigned long newDias) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+
+  calcTempHum();
 
   //Desactiva todos los monitoreos anteriores
   desactivarTodosLosMonitoreos();
@@ -1597,8 +1699,8 @@ void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHum
   doc["humd_limite_max"]  = newHumdMax;
   doc["dias"]             = newDias;
   doc["activa"]           = true;  
-  doc["temp"]             = -1; 
-  doc["humd"]             = -1; 
+  doc["temp"]             = isnan(t) ? 30 : t;
+  doc["humd"]             = isnan(h) ? 60 : h;
   doc["mov"]              = false; 
 
   String json;
@@ -1616,6 +1718,12 @@ void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHum
 
 //Para obtener el json con todas las mediciones, necesito todos los id de las cajas para ponerlas en false
 String obtenerTodosLosMonitoreos() {
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return "";
+  }
+  
   HTTPClient http;
   String url = firebaseURL + "/monitoreos.json";
 
@@ -1635,6 +1743,11 @@ String obtenerTodosLosMonitoreos() {
 
 //Para obtener el json de los datos generales de una sesión ya iniciada/activa
 String obtenerInfoGeneral() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return "";
+  }
+  
   HTTPClient http;
 
   String url = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1667,7 +1780,7 @@ void leerInfoGeneral() {
 
   JsonObject info = doc.as<JsonObject>();
 
-  tiempo = info["dias"];
+  segundos_restantes = info["dias"];
   tempInf = info["temp_limite_min"];
   tempSup = info["temp_limite_max"];
   humdInf = info["humd_limite_min"];
@@ -1727,6 +1840,12 @@ void httpTask(void * parameter) {
 
 //Cambia los límites de temp en la firebase de la caja activa
 void FiBaSetTemp(int newTempInf, int newTempSup){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  
   HttpTask *t = new HttpTask; 
 
   t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1738,6 +1857,12 @@ void FiBaSetTemp(int newTempInf, int newTempSup){
 
 //Actualiza el dato de temperatura y humedad actual
 void FiBaUpdateCurrData(int newTemp, int newHumd) {
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  
   HttpTask *t = new HttpTask; 
 
   t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1749,6 +1874,11 @@ void FiBaUpdateCurrData(int newTemp, int newHumd) {
 
 //Cambia los límites de humd en la firebase de la caja activa
 void FiBaSetHumd(int newHumdInf, int newHumdSup){
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  
   HttpTask *t = new HttpTask; 
 
   t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1759,7 +1889,13 @@ void FiBaSetHumd(int newHumdInf, int newHumdSup){
 }
 
 //Cambia los días en la firebase de la caja activa
-void FiBaSetDias(int newDias){
+void FiBaSetDias(unsigned long newDias){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+
   HttpTask *t = new HttpTask; 
 
   t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
@@ -1769,7 +1905,46 @@ void FiBaSetDias(int newDias){
   xQueueSend(colaHTTP, &t, 0);
 }
 
+//Cambia el movimiento en la firebase de la caja activa
+void FiBaSetMov(bool newMov){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"mov\": " + String(newMov ? "true" : "false") + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0);
+}
+
+
+void FiBiSetTimerRest(unsigned long newRestSeg){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
+  t->payload = "{\"dias\": " + String(newRestSeg) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0);
+}
+
 void FiBaEnviarMedicion(float temperatura, float humedad) {
+
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
 
   // Construir JSON
   StaticJsonDocument<200> doc;
@@ -1968,6 +2143,34 @@ void printEstado(){
 
 }
 
+//Imrpime que no hay wifi y que el sistema está intentando reconectarlo
+void printNoWifi(){
+  lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(" __________________");
+    lcd.setCursor(0, 1);
+    lcd.print("|     Sin WiFi     |");
+    lcd.setCursor(0, 2);
+    lcd.print("|  Reconectando... |");
+    lcd.setCursor(0, 3);
+    lcd.print("|__________________|");
+}
+
+//Checa si hay internet. Si no la hay, imprime un aviso de que no hay
+//ADVERTENCIA!! Esta función limpia el lcd y escribe otra cosa
+//Ponerlo cuando sé que después del delay, imprimirá otra cosa, para que no se quede con el mensaje de printNoWifi por siempre
+bool checkConnection(){
+  Serial.println("ENTRO A LA FUNCIÓN CHECK-------------------------");
+  if (WiFi.status() != WL_CONNECTED) {
+    printNoWifi();
+    delay(1000);
+    Serial.println("NO DETECTÓ CONEXIÓN-------------------------");
+    return false;
+  }
+  Serial.println("DETECTÓ CONEXIÓN-------------------------");
+  return true;
+}
+
 //Imprime errores en el LCD
 //Como imprime un error, deja un while true para dejar el programa atorado aquí
 void showErrorLCD(int id){
@@ -2014,4 +2217,26 @@ bool cmprHumd(){
     return false;
   }
   return false;
+}
+
+void WiFiEvent(WiFiEvent_t event) {
+  switch (event) {
+
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("WiFi: conectado al AP (sin IP todavía)");
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.print("WiFi: IP obtenida: ");
+      Serial.println(WiFi.localIP());
+      break;
+
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("WiFi: desconectado, reintentando...");
+      WiFi.begin(ssid, password);
+      break;
+
+    default:
+      break;
+  }
 }
