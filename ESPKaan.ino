@@ -27,6 +27,10 @@
 #define DHTPIN 4                //Pin del sensor de temperatura y humedad
 #define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
 
+#define PINWIFI 0
+#define PINTEMP 2
+#define PINHUMD 15
+
 MPU6050 mpu;
 
 /////////ssid y password del wifi
@@ -319,6 +323,11 @@ void setup() {
   // Configurar Pines del Encoder
   pinMode(ENCODER_CLK_PIN, INPUT);
   pinMode(ENCODER_DT_PIN, INPUT);
+
+  //Configuración de los pines de aviso
+  pinMode(PINWIFI, OUTPUT);
+  pinMode(PINHUMD, OUTPUT);
+  pinMode(PINTEMP, OUTPUT);
   
   // Activar la interrupción en el pin CLK
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), readEncoderISR, CHANGE);
@@ -2203,20 +2212,26 @@ void showErrorLCD(int id){
 bool cmprTemp(){
   if((t < tempInf) || (t > tempSup)){
     return true;
+    digitalWrite(PINTEMP, HIGH);
   } else {
     return false;
+    digitalWrite(PINTEMP, LOW);
   }
   return false;
+  digitalWrite(PINTEMP, LOW);
 }
 
 //Para ver si la humd se salió de los límites
 bool cmprHumd(){
   if((h < humdInf) || (h > humdSup)){
     return true;
+    digitalWrite(PINHUMD, HIGH);
   } else {
     return false;
+    digitalWrite(PINHUMD, LOW);
   }
   return false;
+  digitalWrite(PINHUMD, LOW);
 }
 
 void WiFiEvent(WiFiEvent_t event) {
@@ -2224,16 +2239,19 @@ void WiFiEvent(WiFiEvent_t event) {
 
     case ARDUINO_EVENT_WIFI_STA_CONNECTED:
       Serial.println("WiFi: conectado al AP (sin IP todavía)");
+      digitalWrite(PINWIFI, HIGH);
       break;
 
     case ARDUINO_EVENT_WIFI_STA_GOT_IP:
       Serial.print("WiFi: IP obtenida: ");
       Serial.println(WiFi.localIP());
+      digitalWrite(PINWIFI, HIGH);
       break;
 
     case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
       Serial.println("WiFi: desconectado, reintentando...");
       WiFi.begin(ssid, password);
+      digitalWrite(PINWIFI, LOW);
       break;
 
     default:
