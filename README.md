@@ -11,10 +11,11 @@ Push button
 
 Dependencias de Software/librerías:
 LiquidCrystal I2C by Martin Kubovcík, Frank de Brabander
+DHT sensor library by Adafruit (Al intalar este, da la opción de instalar los dos de abajo porque depende de esas dos librerías)
 Adafruit BusIO by Adafruit
 Adafruit Unified Sensor by Adafruit
 ArduinoJson by Benoit Blanchon
-DHT sensor library by Adafruit
+MPU6050 by Electronics Cats
 
 Recordatorio!!!
 Arduino IDE exige que el archivo .ino esté dentro de una carpeta donde sólo esté el .ino, y se llame igual que el .ino.
