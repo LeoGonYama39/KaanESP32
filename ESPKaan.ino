@@ -28,17 +28,18 @@
 #define DHTTYPE DHT11           //Tipo del sensor (Porque hay como FHT11, DHT12, etc)
 
 #define PINWIFI 0
-#define PINTEMP 2
-#define PINHUMD 15
+#define PINTEMP 33
+#define PINHUMD 32
+#define PINBUZZ 25
 
 MPU6050 mpu;
 
 /////////ssid y password del wifi
-//const char* ssid = "OTOÑO25";       
-//const char* password = "Ib3r02025ui@"; 
+const char* ssid = "OTOÑO25";       
+const char* password = "Ib3r02025ui@"; 
 
-const char* ssid = "INFINITUMABD2_2.4";       
-const char* password = "2GJ98hx27P"; 
+//const char* ssid = "INFINITUMABD2_2.4";       
+//const char* password = "2GJ98hx27P"; 
 
 //const char* ssid = "motoLeoDatos";       
 //const char* password = ""; 
@@ -328,6 +329,11 @@ void setup() {
   pinMode(PINWIFI, OUTPUT);
   pinMode(PINHUMD, OUTPUT);
   pinMode(PINTEMP, OUTPUT);
+  pinMode(PINBUZZ, OUTPUT);
+  
+  //Configuración de buzzer
+  tone(PINBUZZ, 440);   //Nota A4
+  
   
   // Activar la interrupción en el pin CLK
   attachInterrupt(digitalPinToInterrupt(ENCODER_CLK_PIN), readEncoderISR, CHANGE);
@@ -546,8 +552,19 @@ void loop() {
       alertT = cmprTemp();
       alertH = cmprHumd();
 
-      if(alertT) Serial.println("Alerta en temperatura");
-      if(alertH) Serial.println("Alerta en humedad");
+      if(alertT){
+        Serial.println("Alerta en temperatura");
+        digitalWrite(PINTEMP, HIGH);
+      } else {
+        digitalWrite(PINTEMP, LOW);
+      }
+
+      if(alertH){
+        Serial.println("Alerta en humedad");
+        digitalWrite(PINHUMD, HIGH);
+      } else {
+        digitalWrite(PINHUMD, LOW);
+      }  
 
       switch(currentState){
         case STATE_HOME: 
@@ -2212,26 +2229,20 @@ void showErrorLCD(int id){
 bool cmprTemp(){
   if((t < tempInf) || (t > tempSup)){
     return true;
-    digitalWrite(PINTEMP, HIGH);
   } else {
     return false;
-    digitalWrite(PINTEMP, LOW);
   }
   return false;
-  digitalWrite(PINTEMP, LOW);
 }
 
 //Para ver si la humd se salió de los límites
 bool cmprHumd(){
   if((h < humdInf) || (h > humdSup)){
     return true;
-    digitalWrite(PINHUMD, HIGH);
   } else {
     return false;
-    digitalWrite(PINHUMD, LOW);
   }
   return false;
-  digitalWrite(PINHUMD, LOW);
 }
 
 void WiFiEvent(WiFiEvent_t event) {
