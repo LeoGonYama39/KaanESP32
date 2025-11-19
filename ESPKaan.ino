@@ -35,11 +35,11 @@
 MPU6050 mpu;
 
 /////////ssid y password del wifi
-const char* ssid = "OTOÑO25";       
-const char* password = "Ib3r02025ui@"; 
+//const char* ssid = "OTOÑO25";       
+//const char* password = "Ib3r02025ui@"; 
 
-//const char* ssid = "INFINITUMABD2_2.4";       
-//const char* password = "2GJ98hx27P"; 
+const char* ssid = "INFINITUMABD2_2.4";       
+const char* password = "2GJ98hx27P"; 
 
 //const char* ssid = "motoLeoDatos";       
 //const char* password = ""; 
@@ -332,7 +332,7 @@ void setup() {
   pinMode(PINBUZZ, OUTPUT);
   
   //Configuración de buzzer
-  tone(PINBUZZ, 440);   //Nota A4
+  tone(PINBUZZ, 10, 200);   //Nota A4
   
   
   // Activar la interrupción en el pin CLK
@@ -343,6 +343,7 @@ void setup() {
 
   /////////////////////Setup del núcleo 1////////////////////
   //Puede poner a la cola hasta 10 peticiones
+  
   //sizeof, es el tamaño de lo que recibirá la cola (apuntador del struct)
   colaHTTP = xQueueCreate(10, sizeof(HttpTask*));
 
@@ -565,6 +566,10 @@ void loop() {
       } else {
         digitalWrite(PINHUMD, LOW);
       }  
+
+      if(alertH || alertT){
+        tone(PINBUZZ, 10, 200); 
+      }
 
       switch(currentState){
         case STATE_HOME: 
