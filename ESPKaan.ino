@@ -443,7 +443,6 @@ void setup() {
   }
 
   setup_wifi(true);
-  delay(3000);
   initTimeLocal(true);
 
   printSearchSesiones();
@@ -452,13 +451,13 @@ void setup() {
 
   if(!idCaja.length()){ //Si está vacío el string, no encontró cajas
     printSesionOn();
-    delay(3000);
+    delay(1500);
     idCaja = "1_ID";
     sessionActive = false;
   } else {
     printSesionOff();
     leerInfoGeneral();
-    delay(3000);
+    delay(1500);
     sessionActive = true;
   }
 
