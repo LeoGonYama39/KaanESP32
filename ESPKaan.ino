@@ -1732,6 +1732,8 @@ void setup_wifi(bool showLCD) {
 
 
 //Para iniciar una nueva medición
+//Hace a la vez, el seteo de false a todas las mediciones para evitar que haya una
+//ventana sin ninguna medición en true en la firebase
 void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHumdMax, unsigned long newDias) {
 
   if (WiFi.status() != WL_CONNECTED) {
@@ -1741,30 +1743,43 @@ void subirInfoGeneral(int newTempMin, int newTempMax, int newHumdMin, int newHum
 
   calcTempHum();
 
-  //Desactiva todos los monitoreos anteriores
-  desactivarTodosLosMonitoreos();
+  String todos = obtenerTodosLosMonitoreos();
+  if (todos == "") return;
 
-  StaticJsonDocument<300> doc;
+  StaticJsonDocument<6000> docTodos;
+  deserializeJson(docTodos, todos);
 
-  doc["fecha_inicio"]     = generarFechaISO();
-  doc["temp_limite_min"]  = newTempMin;
-  doc["temp_limite_max"]  = newTempMax;
-  doc["humd_limite_min"]  = newHumdMin;
-  doc["humd_limite_max"]  = newHumdMax;
-  doc["dias"]             = newDias;
-  doc["activa"]           = true;  
-  doc["temp"]             = isnan(t) ? 30 : t;
-  doc["humd"]             = isnan(h) ? 60 : h;
-  doc["mov"]              = false; 
+  StaticJsonDocument<7000> updateDoc;
 
-  String json;
-  serializeJson(doc, json);
+  //Para poder desactivar todos
+  for (JsonPair caja : docTodos.as<JsonObject>()) {
+    String id = caja.key().c_str();
+    updateDoc["monitoreos/" + id + "/info_general/activa"] = false;
+  }
+
+  String id = idCaja; 
+
+  updateDoc["monitoreos/" + id + "/info_general/fecha_inicio"]     = generarFechaISO();
+  updateDoc["monitoreos/" + id + "/info_general/temp_limite_min"]  = newTempMin;
+  updateDoc["monitoreos/" + id + "/info_general/temp_limite_max"]  = newTempMax;
+  updateDoc["monitoreos/" + id + "/info_general/humd_limite_min"]  = newHumdMin;
+  updateDoc["monitoreos/" + id + "/info_general/humd_limite_max"]  = newHumdMax;
+  updateDoc["monitoreos/" + id + "/info_general/dias"]             = newDias;
+
+  updateDoc["monitoreos/" + id + "/info_general/temp"]             = isnan(t) ? 30 : t;
+  updateDoc["monitoreos/" + id + "/info_general/humd"]             = isnan(h) ? 60 : h;
+  updateDoc["monitoreos/" + id + "/info_general/mov"]              = false;
+  updateDoc["monitoreos/" + id + "/info_general/activa"]           = true;
+
+
+  String jsonOut;
+  serializeJson(updateDoc, jsonOut);
 
   HttpTask *t = new HttpTask;
 
-  t->endpoint = firebaseURL + "/monitoreos/" + idCaja + "/info_general.json";
-  t->method   = "PUT";
-  t->payload  = json;  
+  t->endpoint = firebaseURL + ".json";  
+  t->method   = "PATCH";
+  t->payload  = jsonOut;
 
   xQueueSend(colaHTTP, &t, 0);
 }
@@ -1839,35 +1854,6 @@ void leerInfoGeneral() {
   tempSup = info["temp_limite_max"];
   humdInf = info["humd_limite_min"];
   humdSup = info["humd_limite_max"];
-}
-
-//Desactiva todas las mediciones activas. Después de esto, se debe de iniciar otra para que haya una activa
-//Este lo dejaré en el núcleo 0
-//Siempre sólo se ejecutará este, sin interrumpir el loop
-//Pueden ser más de 10
-void desactivarTodosLosMonitoreos() {
-  String json = obtenerTodosLosMonitoreos();
-  if (json == "") return;
-
-  //Reservar 5000 bytes para usarlos en el json
-  StaticJsonDocument<5000> doc; 
-  deserializeJson(doc, json);     //Convierte un String en un objeto JSON
-
-  //Recorrer todos los IDs
-  for (JsonPair caja : doc.as<JsonObject>()) {
-    String auxCaja = caja.key().c_str();
-    //.key obtiene el identificador 
-    //.c_str es como un toString()
-
-    //Hace el PATCH con la ruta adecuada, incluyendo el id de la caja obtenida
-    String url = firebaseURL + "/monitoreos/" + auxCaja + "/info_general.json";
-
-    HTTPClient http;
-    http.begin(url);
-    http.addHeader("Content-Type", "application/json");
-    int codigo = http.PATCH("{\"activa\": false}");     //Solicita que para esa caja, haga false en "activa"
-    http.end();
-  }
 }
 
 
