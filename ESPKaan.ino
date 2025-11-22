@@ -42,7 +42,7 @@ const char* ssid = "INFINITUMABD2_2.4";
 const char* password = "2GJ98hx27P"; 
 
 //const char* ssid = "motoLeoDatos";       
-//const char* password = ""; 
+//const char* password = "SebasLeo123"; 
 
 String firebaseURL = "https://pruebaesp32kaan-default-rtdb.firebaseio.com/";
 
@@ -181,6 +181,7 @@ bool sessionActive = false; // Flag para saber si hay una sesión
 
 //ID de la caja
 String idCaja = "";
+int id = -1;          //id de la caja ya con int
 
 // Variables del limites y tiempo
 int tiempo = 7;
@@ -226,6 +227,10 @@ volatile bool timerFIREBASEactive = false;
 esp_timer_handle_t timer_timer_firebase;  
 volatile bool update_timer = false;
 volatile bool timerTimerActive = false;
+
+//Para el "heartbeat"
+esp_timer_handle_t timer_heartbeat;  
+volatile bool heartbeat_ready = false;
 
 ///////////Para el contador de tiempo/////////
 volatile unsigned long segundos_restantes =  86400UL;  //Este sería un día
@@ -296,8 +301,8 @@ void IRAM_ATTR timer_callback(void* arg) {
     case 1: update_lcd = true; break;
     case 2: upload_firebase = true; break; 
     case 3: sens_mov = true; break;
+    case 4: heartbeat_ready = true; break;
   }
-
 }
 
 //////////Para poner en el núcleo 1 (no el 0), las tareas del firebase, no trabará la línea principal)
@@ -386,7 +391,13 @@ void setup() {
     .name = "flag_timer_timer"
   };
 
-  // Configurar el timer
+  esp_timer_create_args_t args_heartbeat = {
+    .callback = &timer_callback,
+    .arg = (void*)4,
+    .dispatch_method = ESP_TIMER_TASK,
+    .name = "flag_heartbeat"
+  };
+
   const esp_timer_create_args_t timer_args = {
     .callback = &contador_callback,
     .arg = (void*)1,
@@ -399,6 +410,9 @@ void setup() {
   esp_timer_create(&args_firebase, &timer_firebase);
   esp_timer_create(&args_mov, &timer_mov); 
   esp_timer_create(&args_timer_timer, &timer_timer_firebase);      
+  esp_timer_create(&args_heartbeat, &timer_heartbeat);      
+
+  esp_timer_start_periodic(timer_heartbeat, 5000000);
 
   // Iniciar LCD
   lcd.init();
@@ -434,6 +448,7 @@ void setup() {
 
   printSearchSesiones();
   idCaja = obtenerCajaActiva();
+  id = calcId(idCaja);
 
   if(!idCaja.length()){ //Si está vacío el string, no encontró cajas
     printSesionOn();
@@ -614,6 +629,14 @@ void loop() {
     update_timer = false;
     Serial.println("Cambio del timer mandado");
     FiBiSetTimerRest(segundos_restantes);
+  }
+
+  //Para mandar cada 5 segundos un heartbeat, para comprobar si el
+  //ESP está encendido
+  if(heartbeat_ready){
+    heartbeat_ready = false;
+    Serial.println("Enviando heartbeat...");
+    FiBaHeartbeat(time(nullptr));
   }
 
 }
@@ -955,6 +978,7 @@ void handleStateLogic() {
           stopTimerMov();
           stopTimerTimer();
           idCaja = siguienteID(idCaja); //Calcular la nueva id
+          id = calcId(idCaja);
         } else { 
           currentState = STATE_MENU_MAIN;
         }
@@ -1145,7 +1169,7 @@ void drawScreen() {
     
     case STATE_HOME:  //Pantalla que muestra los datos leídos
       lcd.print("CAJA ");
-      lcd.print(idCaja);
+      lcd.print(id);
       lcd.print(" [ACTIVA]");
       lcd.setCursor(0, 1);
       lcd.print("T: ---.- ");
@@ -1413,7 +1437,7 @@ void drawScreen() {
       lcd.print("Iniciar monitoreo");
       lcd.setCursor(0, 2);
       lcd.print("Caja ");
-      lcd.print(idCaja);
+      lcd.print(id);
       lcd.print("?"); 
       lcd.setCursor(0, 3);
       lcd.print("> Iniciar");
@@ -1887,7 +1911,7 @@ void FiBaSetTemp(int newTempInf, int newTempSup){
 }
 
 //Actualiza el dato de temperatura y humedad actual
-void FiBaUpdateCurrData(int newTemp, int newHumd) {
+void FiBaUpdateCurrData(float newTemp, int newHumd) {
   
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("No hay WiFi, saltando envío.");
@@ -1953,6 +1977,22 @@ void FiBaSetMov(bool newMov){
   xQueueSend(colaHTTP, &t, 0);
 }
 
+
+//Mandar el heartbeat
+void FiBaHeartbeat(long time){
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+
+  HttpTask *t = new HttpTask; 
+
+  t->endpoint = firebaseURL + "/system/heartbeat.json";
+  t->payload  = "{\"last_update\": " + String(time) + "}";
+  t->method = "PATCH";
+
+  xQueueSend(colaHTTP, &t, 0);
+}
 
 void FiBiSetTimerRest(unsigned long newRestSeg){
   
@@ -2273,4 +2313,11 @@ void WiFiEvent(WiFiEvent_t event) {
     default:
       break;
   }
+}
+
+//Función para convertir el idCaja en id int
+//Asume que siempre está con el formato 1_ID, 2_ID, .... i_ID
+int calcId(String idCajaCalc) {
+    if (idCajaCalc.isEmpty()) return -1;
+    return idCajaCalc[0] - '0';
 }
