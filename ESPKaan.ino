@@ -2302,7 +2302,11 @@ void WiFiEvent(WiFiEvent_t event) {
 
 //Función para convertir el idCaja en id int
 //Asume que siempre está con el formato 1_ID, 2_ID, .... i_ID
-int calcId(String idCajaCalc) {
-    if (idCajaCalc.isEmpty()) return -1;
-    return idCajaCalc[0] - '0';
+int calcId(const String& idCaja) {
+    int pos = idCaja.indexOf('_');
+    if (pos == -1) return -1;
+
+    String numero = idCaja.substring(0, pos);
+    return numero.toInt();   // Arduino lo convierte a int
 }
+
