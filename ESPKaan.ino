@@ -203,6 +203,7 @@ float prevH = 0.0, prevT = 0.0;   //Es la medición previa, para determinar si n
 #define UMBRAL 0.2                //Si el cambio pasa este umbral, manda a actualizar los datos
 DHT dht(DHTPIN, DHTTYPE);
 volatile bool alertT = false, alertH = false;   //Para indicar si se superó el límite o no
+volatile bool alertTPrev = false, alertHPrev = false;   //Para decidir si necesito notificaciones o no
 volatile bool blinkTempHumd = false;            //Para que parpadee si se pasó del límite
 
 //Para movimiento
@@ -241,6 +242,11 @@ unsigned long restante;
 volatile bool dias_lcd = false;
 volatile bool dias_end = false;
 volatile bool parpadea = false;
+
+////////////////Variables para las notis/////////////////
+volatile bool outRangeTemp = false, outRangeTempPrev = false;
+volatile bool outRangeHumd = false, outRangeHumdPrev = false;
+volatile bool outRangeMov = false, outRangeMovPrev = false;
 
 
 // Callback que se ejecuta cada segundo
@@ -559,6 +565,8 @@ void loop() {
     blinkTempHumd = !blinkTempHumd;
     calcTempHum();
     //Serial.printf("T: %.2f ºC, H: %.2f%%\n", t, h);
+
+    //Actualizo los datos de temp y humd sólametne si cambió
     if (!isnan(t) && !isnan(h)){
       if (abs(prevT - t) >= UMBRAL || abs(prevH - h) >= UMBRAL) {
         Serial.println("Cambio detectado, cambiando en firebase");
@@ -568,17 +576,19 @@ void loop() {
       alertH = cmprHumd();
 
       if(alertT){
-        Serial.println("Alerta en temperatura");
         digitalWrite(PINTEMP, HIGH);
+        if(alertT && !alertTPrev) Serial.println("Enviando noti de temp");
       } else {
         digitalWrite(PINTEMP, LOW);
+        if(!alertT && alertTPrev) Serial.println("Ya puede enviar otra noti de temp");
       }
 
       if(alertH){
-        Serial.println("Alerta en humedad");
         digitalWrite(PINHUMD, HIGH);
+        if(alertH && !alertHPrev) Serial.println("Enviando noti de humd");
       } else {
         digitalWrite(PINHUMD, LOW);
+        if(!alertH && alertHPrev) Serial.println("Ya puede enviar otra noti de humd");
       }  
 
       if(alertH || alertT){
@@ -611,12 +621,14 @@ void loop() {
 
     }
 
+    alertTPrev = alertT;
+    alertHPrev = alertH;
+
   }
 
-  //////Para subir datos a firebase////////////
+  //////Para subir datos a firebase, para el historial////////////
   if (upload_firebase) {
     upload_firebase = false;
-    Serial.println("Upload a firebase");
     if (!isnan(t) && !isnan(h)){
       FiBaEnviarMedicion(t, h);
     } 
