@@ -356,7 +356,7 @@ void setup() {
   //Puede poner a la cola hasta 10 peticiones
   
   //sizeof, es el tamaño de lo que recibirá la cola (apuntador del struct)
-  colaHTTP = xQueueCreate(10, sizeof(HttpTask*));
+  colaHTTP = xQueueCreate(30, sizeof(HttpTask*));
 
   xTaskCreatePinnedToCore(
     httpTask,       //la función que ejecuta la tarea
@@ -550,6 +550,7 @@ void loop() {
             movDetected = true;                 //Activo que se movió para que en el siguiente ciclo, cuente
             restCount = 0;                      //Rereteo el contador
             Serial.println("Se movió");
+            NotifMov();
             FiBaSetMov(true);
         }
     }
@@ -577,18 +578,18 @@ void loop() {
 
       if(alertT){
         digitalWrite(PINTEMP, HIGH);
-        if(alertT && !alertTPrev) Serial.println("Enviando noti de temp");
+        if(alertT && !alertTPrev) NotifTempAnormal();
       } else {
         digitalWrite(PINTEMP, LOW);
-        if(!alertT && alertTPrev) Serial.println("Ya puede enviar otra noti de temp");
+        if(!alertT && alertTPrev) NotifTempNormal();
       }
 
       if(alertH){
         digitalWrite(PINHUMD, HIGH);
-        if(alertH && !alertHPrev) Serial.println("Enviando noti de humd");
+        if(alertH && !alertHPrev) NotifHumdAnormal();
       } else {
         digitalWrite(PINHUMD, LOW);
-        if(!alertH && alertHPrev) Serial.println("Ya puede enviar otra noti de humd");
+        if(!alertH && alertHPrev) NotifHumdNormal();
       }  
 
       if(alertH || alertT){
@@ -1905,6 +1906,83 @@ void FiBaSetTemp(int newTempInf, int newTempSup){
   t->method = "PATCH";
 
   xQueueSend(colaHTTP, &t, 0); 
+}
+
+//Notificar anomalía en la temperatura
+void NotifTempAnormal(){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  Serial.println("Mandando noti temp anormal");
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->method = "POST";
+  t->payload = "{\"titulo\": \"Alerta en temperatura\", \"mensaje\": \"Temperatura fuera de rango\"}";
+  xQueueSend(colaHTTP, &t, 0);
+}
+
+//Notificar temperatura vuelve a normal
+void NotifTempNormal(){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  Serial.println("Mandando noti temp normal");
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->method = "POST";
+  t->payload = "{\"titulo\": \"Temperatura estable\", \"mensaje\": \"La temperatura volvió a su rango estable\"}";
+  xQueueSend(colaHTTP, &t, 0);
+}
+
+
+//Notificar anomalía en la humedad
+void NotifHumdAnormal(){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  Serial.println("Mandando noti humd anormal");
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->method = "POST";
+  t->payload = "{\"titulo\": \"Alerta en humedad\", \"mensaje\": \"Humedad fuera de rango\"}";
+  xQueueSend(colaHTTP, &t, 0);
+}
+
+//Notificar humedad vuelve a normal
+void NotifHumdNormal(){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  Serial.println("Mandando noti humd normal");
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->method = "POST";
+  t->payload = "{\"titulo\": \"humedad estable\", \"mensaje\": \"La humedad volvió a su rango estable\"}";
+  xQueueSend(colaHTTP, &t, 0);
+}
+
+
+//Notificar movimiento
+void NotifMov(){
+  
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("No hay WiFi, saltando envío.");
+    return;
+  }
+  Serial.println("Mandando noti humd anormal");
+  HttpTask *t = new HttpTask;
+  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->method = "POST";
+  t->payload = "{\"titulo\": \"Movimiento\", \"mensaje\": \"Movimiento brusco detectado\"}";
+  xQueueSend(colaHTTP, &t, 0);
 }
 
 //Actualiza el dato de temperatura y humedad actual
