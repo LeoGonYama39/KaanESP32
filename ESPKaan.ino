@@ -1917,7 +1917,7 @@ void NotifTempAnormal(){
   }
   Serial.println("Mandando noti temp anormal");
   HttpTask *t = new HttpTask;
-  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->endpoint = firebaseURL + "/notiTemp.json";
   t->method = "POST";
   t->payload = "{\"titulo\": \"Alerta en temperatura\", \"mensaje\": \"Temperatura fuera de rango\"}";
   xQueueSend(colaHTTP, &t, 0);
@@ -1932,7 +1932,7 @@ void NotifTempNormal(){
   }
   Serial.println("Mandando noti temp normal");
   HttpTask *t = new HttpTask;
-  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->endpoint = firebaseURL + "/notiTemp.json";
   t->method = "POST";
   t->payload = "{\"titulo\": \"Temperatura estable\", \"mensaje\": \"La temperatura volvió a su rango estable\"}";
   xQueueSend(colaHTTP, &t, 0);
@@ -1948,7 +1948,7 @@ void NotifHumdAnormal(){
   }
   Serial.println("Mandando noti humd anormal");
   HttpTask *t = new HttpTask;
-  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->endpoint = firebaseURL + "/notiHumd.json";
   t->method = "POST";
   t->payload = "{\"titulo\": \"Alerta en humedad\", \"mensaje\": \"Humedad fuera de rango\"}";
   xQueueSend(colaHTTP, &t, 0);
@@ -1963,7 +1963,7 @@ void NotifHumdNormal(){
   }
   Serial.println("Mandando noti humd normal");
   HttpTask *t = new HttpTask;
-  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->endpoint = firebaseURL + "/notiHumd.json";
   t->method = "POST";
   t->payload = "{\"titulo\": \"humedad estable\", \"mensaje\": \"La humedad volvió a su rango estable\"}";
   xQueueSend(colaHTTP, &t, 0);
@@ -1977,9 +1977,9 @@ void NotifMov(){
     Serial.println("No hay WiFi, saltando envío.");
     return;
   }
-  Serial.println("Mandando noti humd anormal");
+  Serial.println("Mandando noti mov");
   HttpTask *t = new HttpTask;
-  t->endpoint = firebaseURL + "/notificaciones.json";
+  t->endpoint = firebaseURL + "/notiMov.json";
   t->method = "POST";
   t->payload = "{\"titulo\": \"Movimiento\", \"mensaje\": \"Movimiento brusco detectado\"}";
   xQueueSend(colaHTTP, &t, 0);
